@@ -1,14 +1,22 @@
 # ================================================================
 # File: Cargo.toml
 # Path: ~/stm32-rust-test/b-g431b-esc1-rust/Cargo.toml
-# Version: v0.1.5-rtt-adc-pot-debug-fix1
-# Purpose: Minimal Rust no_std firmware crate for B-G431B-ESC1 bring-up with RTT ADC debug
+# Version: v0.4.0-bemf-observe-openloop
+# Purpose: Minimal Rust no_std firmware crate for B-G431B-ESC1
+#          bare-metal ESC bring-up with TIM1 PWM, ADC board
+#          monitoring, open-loop six-step drive, and BEMF observe
 # Target: STM32G431CB, Cortex-M4F, thumbv7em-none-eabihf
+#
+# Bring-up note:
+#   This Cargo.toml intentionally stays simple. The project is still
+#   direct-register bare-metal Rust using cortex-m, cortex-m-rt,
+#   panic-halt, and RTT logging. Board-specific behavior lives in
+#   src/main.rs for the current monolithic baseline.
 # ================================================================
 
 [package]
 name = "b-g431b-esc1-rust"
-version = "0.1.0"
+version = "0.4.0-bemf-observe-openloop"
 edition = "2024"
 
 [dependencies]
@@ -30,7 +38,7 @@ opt-level = "s"
 # ================================================================
 # Footer
 # File: Cargo.toml
-# Version: v0.1.5-rtt-adc-pot-debug-fix1
+# Version: v0.4.0-bemf-observe-openloop
 # Created: 2026-06-07
 # Generated timestamp: 2026-06-07
 # ================================================================
