@@ -1,8 +1,8 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.1.8-pa0-vbus-raw-monitor
-// Purpose: STM32G431CB Rust bring-up: live PB12 pot + PB14 temp + PA0 VBUS raw ADC over RTT
+// Version: v0.1.9-opamp-output-raw-monitor
+// Purpose: STM32G431CB Rust bring-up: live pot/temp/VBUS + raw OPAMP output ADC monitor over RTT
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 // ================================================================
 
@@ -24,7 +24,9 @@ const RCC_BASE: usize = 0x4002_1000;
 const GPIOA_BASE: usize = 0x4800_0000;
 const GPIOB_BASE: usize = 0x4800_0400;
 const GPIOC_BASE: usize = 0x4800_0800;
+
 const ADC1_BASE: usize = 0x5000_0000;
+const ADC2_BASE: usize = 0x5000_0100;
 const ADC12_COMMON_BASE: usize = 0x5000_0300;
 
 // ------------------------------------------------------------
@@ -56,17 +58,40 @@ const GPIOC_IDR: *const u32 = (GPIOC_BASE + 0x10) as *const u32;
 const GPIOC_BSRR: *mut u32 = (GPIOC_BASE + 0x18) as *mut u32;
 
 // ------------------------------------------------------------
-// ADC1 registers
+// ADC register helpers
 // ------------------------------------------------------------
 
-const ADC1_ISR: *mut u32 = (ADC1_BASE + 0x00) as *mut u32;
-const ADC1_CR: *mut u32 = (ADC1_BASE + 0x08) as *mut u32;
-const ADC1_CFGR: *mut u32 = (ADC1_BASE + 0x0C) as *mut u32;
-const ADC1_SMPR1: *mut u32 = (ADC1_BASE + 0x14) as *mut u32;
-const ADC1_SMPR2: *mut u32 = (ADC1_BASE + 0x18) as *mut u32;
-const ADC1_SQR1: *mut u32 = (ADC1_BASE + 0x30) as *mut u32;
-const ADC1_DR: *const u32 = (ADC1_BASE + 0x40) as *const u32;
-const ADC1_DIFSEL: *mut u32 = (ADC1_BASE + 0xB0) as *mut u32;
+fn adc_isr(adc_base: usize) -> *mut u32 {
+    (adc_base + 0x00) as *mut u32
+}
+
+fn adc_cr(adc_base: usize) -> *mut u32 {
+    (adc_base + 0x08) as *mut u32
+}
+
+fn adc_cfgr(adc_base: usize) -> *mut u32 {
+    (adc_base + 0x0C) as *mut u32
+}
+
+fn adc_smpr1(adc_base: usize) -> *mut u32 {
+    (adc_base + 0x14) as *mut u32
+}
+
+fn adc_smpr2(adc_base: usize) -> *mut u32 {
+    (adc_base + 0x18) as *mut u32
+}
+
+fn adc_sqr1(adc_base: usize) -> *mut u32 {
+    (adc_base + 0x30) as *mut u32
+}
+
+fn adc_dr(adc_base: usize) -> *const u32 {
+    (adc_base + 0x40) as *const u32
+}
+
+fn adc_difsel(adc_base: usize) -> *mut u32 {
+    (adc_base + 0xB0) as *mut u32
+}
 
 const ADC12_CCR: *mut u32 = (ADC12_COMMON_BASE + 0x08) as *mut u32;
 
@@ -90,12 +115,20 @@ const STATUS_LED_PIN: u32 = 6;   // PC6
 const USER_BUTTON_PIN: u32 = 10; // PC10
 
 const VBUS_PIN: u32 = 0; // PA0
+const OP1_OUT_PIN: u32 = 2; // PA2
+const OP2_OUT_PIN: u32 = 6; // PA6
+
+const OP3_OUT_PIN: u32 = 1; // PB1
 const POT_PIN: u32 = 12; // PB12
 const TEMP_PIN: u32 = 14; // PB14
 
+// ADC channels
 const VBUS_ADC_CHANNEL: u32 = 1; // PA0 / ADC1_IN1
-const POT_ADC_CHANNEL: u32 = 11; // PB12 / ADC1_IN11
+const OP1_OUT_ADC_CHANNEL: u32 = 3; // PA2 / ADC1_IN3
+const OP2_OUT_ADC_CHANNEL: u32 = 3; // PA6 / ADC2_IN3
+const OP3_OUT_ADC_CHANNEL: u32 = 12; // PB1 / ADC1_IN12
 const TEMP_ADC_CHANNEL: u32 = 5; // PB14 / ADC1_IN5
+const POT_ADC_CHANNEL: u32 = 11; // PB12 / ADC1_IN11
 
 const ADC_TIMEOUT_VALUE: u16 = 0xFFFF;
 
@@ -139,32 +172,62 @@ fn delay_fast_button() {
 // ADC helpers
 // ------------------------------------------------------------
 
-fn adc1_select_channel(channel: u32) {
+fn adc1_select_channel(adc_base: usize, channel: u32) {
     unsafe {
         // Regular sequence length = 1 conversion.
         // SQ1 = selected channel, bits [10:6].
         let sqr1 = channel << 6;
-        write_volatile(ADC1_SQR1, sqr1);
+        write_volatile(adc_sqr1(adc_base), sqr1);
     }
 }
 
-fn adc1_read_channel_raw(channel: u32) -> u16 {
+fn adc_set_sample_time(adc_base: usize, channel: u32) {
     unsafe {
-        adc1_select_channel(channel);
+        // Use longest sampling time for all bring-up channels.
+        // Good for high-impedance dividers / sensor networks.
+        let sample_bits: u32 = 0b111;
+
+        if channel <= 9 {
+            let shift = channel * 3;
+            let mut smpr1 = read_volatile(adc_smpr1(adc_base));
+            smpr1 &= !(0b111 << shift);
+            smpr1 |= sample_bits << shift;
+            write_volatile(adc_smpr1(adc_base), smpr1);
+        } else {
+            let shift = (channel - 10) * 3;
+            let mut smpr2 = read_volatile(adc_smpr2(adc_base));
+            smpr2 &= !(0b111 << shift);
+            smpr2 |= sample_bits << shift;
+            write_volatile(adc_smpr2(adc_base), smpr2);
+        }
+    }
+}
+
+fn adc_set_single_ended(adc_base: usize, channel: u32) {
+    unsafe {
+        let mut difsel = read_volatile(adc_difsel(adc_base));
+        difsel &= !(1 << channel);
+        write_volatile(adc_difsel(adc_base), difsel);
+    }
+}
+
+fn adc_read_channel_raw(adc_base: usize, channel: u32) -> u16 {
+    unsafe {
+        adc1_select_channel(adc_base, channel);
 
         // Clear old EOC/EOS flags.
-        write_volatile(ADC1_ISR, ADC_ISR_EOC | ADC_ISR_EOS);
+        write_volatile(adc_isr(adc_base), ADC_ISR_EOC | ADC_ISR_EOS);
 
         // Start regular conversion.
-        let cr = read_volatile(ADC1_CR);
-        write_volatile(ADC1_CR, cr | ADC_CR_ADSTART);
+        let cr = read_volatile(adc_cr(adc_base));
+        write_volatile(adc_cr(adc_base), cr | ADC_CR_ADSTART);
 
         // Poll for conversion complete with a timeout.
         for _ in 0..1_000_000 {
-            let isr = read_volatile(ADC1_ISR);
+            let isr = read_volatile(adc_isr(adc_base));
 
             if (isr & ADC_ISR_EOC) != 0 {
-                let raw = read_volatile(ADC1_DR) & 0x0FFF;
+                let raw = read_volatile(adc_dr(adc_base)) & 0x0FFF;
                 return raw as u16;
             }
         }
@@ -239,21 +302,63 @@ fn setup_gpio() {
 
         asm::delay(8_000);
 
-        // PA0 = analog mode for VBUS feedback.
+        // GPIOA analog pins:
+        // PA0 = VBUS
+        // PA2 = OP1_OUT
+        // PA6 = OP2_OUT
         let mut gpioa_moder = read_volatile(GPIOA_MODER);
+
         gpioa_moder &= !(0b11 << (VBUS_PIN * 2));
         gpioa_moder |= 0b11 << (VBUS_PIN * 2);
+
+        gpioa_moder &= !(0b11 << (OP1_OUT_PIN * 2));
+        gpioa_moder |= 0b11 << (OP1_OUT_PIN * 2);
+
+        gpioa_moder &= !(0b11 << (OP2_OUT_PIN * 2));
+        gpioa_moder |= 0b11 << (OP2_OUT_PIN * 2);
+
         write_volatile(GPIOA_MODER, gpioa_moder);
 
-        // PA0 = no pull-up / no pull-down.
         let mut gpioa_pupdr = read_volatile(GPIOA_PUPDR);
         gpioa_pupdr &= !(0b11 << (VBUS_PIN * 2));
+        gpioa_pupdr &= !(0b11 << (OP1_OUT_PIN * 2));
+        gpioa_pupdr &= !(0b11 << (OP2_OUT_PIN * 2));
         write_volatile(GPIOA_PUPDR, gpioa_pupdr);
 
-        // PA0 analog switch enable.
         let mut gpioa_ascr = read_volatile(GPIOA_ASCR);
         gpioa_ascr |= 1 << VBUS_PIN;
+        gpioa_ascr |= 1 << OP1_OUT_PIN;
+        gpioa_ascr |= 1 << OP2_OUT_PIN;
         write_volatile(GPIOA_ASCR, gpioa_ascr);
+
+        // GPIOB analog pins:
+        // PB1  = OP3_OUT
+        // PB12 = potentiometer
+        // PB14 = temperature feedback
+        let mut gpiob_moder = read_volatile(GPIOB_MODER);
+
+        gpiob_moder &= !(0b11 << (OP3_OUT_PIN * 2));
+        gpiob_moder |= 0b11 << (OP3_OUT_PIN * 2);
+
+        gpiob_moder &= !(0b11 << (POT_PIN * 2));
+        gpiob_moder |= 0b11 << (POT_PIN * 2);
+
+        gpiob_moder &= !(0b11 << (TEMP_PIN * 2));
+        gpiob_moder |= 0b11 << (TEMP_PIN * 2);
+
+        write_volatile(GPIOB_MODER, gpiob_moder);
+
+        let mut gpiob_pupdr = read_volatile(GPIOB_PUPDR);
+        gpiob_pupdr &= !(0b11 << (OP3_OUT_PIN * 2));
+        gpiob_pupdr &= !(0b11 << (POT_PIN * 2));
+        gpiob_pupdr &= !(0b11 << (TEMP_PIN * 2));
+        write_volatile(GPIOB_PUPDR, gpiob_pupdr);
+
+        let mut gpiob_ascr = read_volatile(GPIOB_ASCR);
+        gpiob_ascr |= 1 << OP3_OUT_PIN;
+        gpiob_ascr |= 1 << POT_PIN;
+        gpiob_ascr |= 1 << TEMP_PIN;
+        write_volatile(GPIOB_ASCR, gpiob_ascr);
 
         // PC6 = output for STATUS LED.
         let mut gpioc_moder = read_volatile(GPIOC_MODER);
@@ -269,38 +374,10 @@ fn setup_gpio() {
         gpioc_pupdr &= !(0b11 << (USER_BUTTON_PIN * 2));
         gpioc_pupdr |= 0b01 << (USER_BUTTON_PIN * 2);
         write_volatile(GPIOC_PUPDR, gpioc_pupdr);
-
-        // PB12 = analog mode for potentiometer.
-        // PB14 = analog mode for temperature feedback.
-        let mut gpiob_moder = read_volatile(GPIOB_MODER);
-
-        gpiob_moder &= !(0b11 << (POT_PIN * 2));
-        gpiob_moder |= 0b11 << (POT_PIN * 2);
-
-        gpiob_moder &= !(0b11 << (TEMP_PIN * 2));
-        gpiob_moder |= 0b11 << (TEMP_PIN * 2);
-
-        write_volatile(GPIOB_MODER, gpiob_moder);
-
-        // PB12/PB14 = no pull-up / no pull-down.
-        let mut gpiob_pupdr = read_volatile(GPIOB_PUPDR);
-
-        gpiob_pupdr &= !(0b11 << (POT_PIN * 2));
-        gpiob_pupdr &= !(0b11 << (TEMP_PIN * 2));
-
-        write_volatile(GPIOB_PUPDR, gpiob_pupdr);
-
-        // PB12/PB14 analog switch enable.
-        let mut gpiob_ascr = read_volatile(GPIOB_ASCR);
-        gpiob_ascr |= 1 << POT_PIN;
-        gpiob_ascr |= 1 << TEMP_PIN;
-        write_volatile(GPIOB_ASCR, gpiob_ascr);
     }
 }
 
-fn setup_adc1_for_board_monitor() -> u32 {
-    let mut status: u32 = 0;
-
+fn setup_adc12_common_clock() {
     unsafe {
         // ADC12 common clock mode:
         // CKMODE = 01, synchronous clock from HCLK.
@@ -308,56 +385,33 @@ fn setup_adc1_for_board_monitor() -> u32 {
         ccr &= !(0b11 << 16);
         ccr |= 0b01 << 16;
         write_volatile(ADC12_CCR, ccr);
+    }
+}
 
+fn setup_single_adc(adc_base: usize) -> u32 {
+    let mut status: u32 = 0;
+
+    unsafe {
         // Exit deep-power-down and enable ADC voltage regulator.
-        let mut cr = read_volatile(ADC1_CR);
+        let mut cr = read_volatile(adc_cr(adc_base));
         cr &= !ADC_CR_DEEPPWD;
         cr |= ADC_CR_ADVREGEN;
-        write_volatile(ADC1_CR, cr);
+        write_volatile(adc_cr(adc_base), cr);
 
         // ADC regulator startup delay.
         asm::delay(160_000);
 
-        // Single-ended mode for VBUS, potentiometer, and temperature channels.
-        let mut difsel = read_volatile(ADC1_DIFSEL);
-        difsel &= !(1 << VBUS_ADC_CHANNEL);
-        difsel &= !(1 << POT_ADC_CHANNEL);
-        difsel &= !(1 << TEMP_ADC_CHANNEL);
-        write_volatile(ADC1_DIFSEL, difsel);
-
         // Default ADC config:
         // single conversion, right-aligned, 12-bit.
-        write_volatile(ADC1_CFGR, 0);
-
-        // Long sample times for PA0 VBUS ADC1_IN1 and PB14 temp ADC1_IN5.
-        // SMPR1 channels 0..9 use 3 bits per channel.
-        let mut smpr1 = read_volatile(ADC1_SMPR1);
-
-        smpr1 &= !(0b111 << (VBUS_ADC_CHANNEL * 3));
-        smpr1 |= 0b111 << (VBUS_ADC_CHANNEL * 3);
-
-        smpr1 &= !(0b111 << (TEMP_ADC_CHANNEL * 3));
-        smpr1 |= 0b111 << (TEMP_ADC_CHANNEL * 3);
-
-        write_volatile(ADC1_SMPR1, smpr1);
-
-        // Long sample time for PB12 pot channel ADC1_IN11.
-        // SMPR2 channel 10 starts at bit 0.
-        let mut smpr2 = read_volatile(ADC1_SMPR2);
-        smpr2 &= !(0b111 << ((POT_ADC_CHANNEL - 10) * 3));
-        smpr2 |= 0b111 << ((POT_ADC_CHANNEL - 10) * 3);
-        write_volatile(ADC1_SMPR2, smpr2);
-
-        // Default first selected channel.
-        adc1_select_channel(POT_ADC_CHANNEL);
+        write_volatile(adc_cfgr(adc_base), 0);
 
         // Calibrate ADC.
-        let cr_before_cal = read_volatile(ADC1_CR);
-        write_volatile(ADC1_CR, cr_before_cal | ADC_CR_ADCAL);
+        let cr_before_cal = read_volatile(adc_cr(adc_base));
+        write_volatile(adc_cr(adc_base), cr_before_cal | ADC_CR_ADCAL);
 
         let mut cal_done = false;
         for _ in 0..1_000_000 {
-            if (read_volatile(ADC1_CR) & ADC_CR_ADCAL) == 0 {
+            if (read_volatile(adc_cr(adc_base)) & ADC_CR_ADCAL) == 0 {
                 cal_done = true;
                 break;
             }
@@ -368,15 +422,15 @@ fn setup_adc1_for_board_monitor() -> u32 {
         }
 
         // Clear ADRDY before enabling.
-        write_volatile(ADC1_ISR, ADC_ISR_ADRDY);
+        write_volatile(adc_isr(adc_base), ADC_ISR_ADRDY);
 
         // Enable ADC.
-        let cr_before_enable = read_volatile(ADC1_CR);
-        write_volatile(ADC1_CR, cr_before_enable | ADC_CR_ADEN);
+        let cr_before_enable = read_volatile(adc_cr(adc_base));
+        write_volatile(adc_cr(adc_base), cr_before_enable | ADC_CR_ADEN);
 
         let mut ready = false;
         for _ in 0..1_000_000 {
-            if (read_volatile(ADC1_ISR) & ADC_ISR_ADRDY) != 0 {
+            if (read_volatile(adc_isr(adc_base)) & ADC_ISR_ADRDY) != 0 {
                 ready = true;
                 break;
             }
@@ -390,6 +444,51 @@ fn setup_adc1_for_board_monitor() -> u32 {
     status
 }
 
+fn setup_adc1_channels() {
+    // ADC1 channels:
+    // VBUS     PA0  ADC1_IN1
+    // OP1_OUT  PA2  ADC1_IN3
+    // TEMP     PB14 ADC1_IN5
+    // POT      PB12 ADC1_IN11
+    // OP3_OUT  PB1  ADC1_IN12
+
+    adc_set_single_ended(ADC1_BASE, VBUS_ADC_CHANNEL);
+    adc_set_single_ended(ADC1_BASE, OP1_OUT_ADC_CHANNEL);
+    adc_set_single_ended(ADC1_BASE, TEMP_ADC_CHANNEL);
+    adc_set_single_ended(ADC1_BASE, POT_ADC_CHANNEL);
+    adc_set_single_ended(ADC1_BASE, OP3_OUT_ADC_CHANNEL);
+
+    adc_set_sample_time(ADC1_BASE, VBUS_ADC_CHANNEL);
+    adc_set_sample_time(ADC1_BASE, OP1_OUT_ADC_CHANNEL);
+    adc_set_sample_time(ADC1_BASE, TEMP_ADC_CHANNEL);
+    adc_set_sample_time(ADC1_BASE, POT_ADC_CHANNEL);
+    adc_set_sample_time(ADC1_BASE, OP3_OUT_ADC_CHANNEL);
+
+    adc1_select_channel(ADC1_BASE, POT_ADC_CHANNEL);
+}
+
+fn setup_adc2_channels() {
+    // ADC2 channels:
+    // OP2_OUT PA6 ADC2_IN3
+
+    adc_set_single_ended(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
+    adc_set_sample_time(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
+
+    adc1_select_channel(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
+}
+
+fn setup_adc_for_board_monitor() -> (u32, u32) {
+    setup_adc12_common_clock();
+
+    setup_adc1_channels();
+    let adc1_status = setup_single_adc(ADC1_BASE);
+
+    setup_adc2_channels();
+    let adc2_status = setup_single_adc(ADC2_BASE);
+
+    (adc1_status, adc2_status)
+}
+
 // ------------------------------------------------------------
 // Main
 // ------------------------------------------------------------
@@ -399,57 +498,97 @@ fn main() -> ! {
     rtt_init_print!();
 
     setup_gpio();
-    let adc_setup_status = setup_adc1_for_board_monitor();
+    let (adc1_setup_status, adc2_setup_status) = setup_adc_for_board_monitor();
 
     // Startup baselines. These are raw ADC comparison points only.
-    let temp_startup_raw = adc1_read_channel_raw(TEMP_ADC_CHANNEL);
-    let vbus_startup_raw = adc1_read_channel_raw(VBUS_ADC_CHANNEL);
+    let temp_startup_raw = adc_read_channel_raw(ADC1_BASE, TEMP_ADC_CHANNEL);
+    let vbus_startup_raw = adc_read_channel_raw(ADC1_BASE, VBUS_ADC_CHANNEL);
+
+    let op1_startup_raw = adc_read_channel_raw(ADC1_BASE, OP1_OUT_ADC_CHANNEL);
+    let op2_startup_raw = adc_read_channel_raw(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
+    let op3_startup_raw = adc_read_channel_raw(ADC1_BASE, OP3_OUT_ADC_CHANNEL);
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.1.8-pa0-vbus-raw-monitor");
+    rprintln!("Version: v0.1.9-opamp-output-raw-monitor");
     rprintln!("PC6  = STATUS LED");
     rprintln!("PC10 = button input");
     rprintln!("PB12 = potentiometer / ADC1_IN11");
     rprintln!("PB14 = temperature feedback / ADC1_IN5");
     rprintln!("PA0  = VBUS feedback / ADC1_IN1");
-    rprintln!("ADC setup status: {}", adc_setup_status);
+    rprintln!("PA2  = OP1_OUT raw monitor / ADC1_IN3");
+    rprintln!("PA6  = OP2_OUT raw monitor / ADC2_IN3");
+    rprintln!("PB1  = OP3_OUT raw monitor / ADC1_IN12");
+    rprintln!("ADC1 setup status: {}", adc1_setup_status);
+    rprintln!("ADC2 setup status: {}", adc2_setup_status);
     rprintln!("temp_startup_raw: {}", temp_startup_raw);
     rprintln!("vbus_startup_raw: {}", vbus_startup_raw);
+    rprintln!("op1_startup_raw: {}", op1_startup_raw);
+    rprintln!("op2_startup_raw: {}", op2_startup_raw);
+    rprintln!("op3_startup_raw: {}", op3_startup_raw);
+    rprintln!("Note: OPAMP peripheral is not configured yet; these are raw OPx_OUT ADC pin readings.");
     rprintln!("Output format:");
-    rprintln!("button=<0/1> pot_raw=<0..4095> pot_pct=<0..100> temp_raw=<0..4095> temp_delta=<raw-startup> vbus_raw=<0..4095> vbus_delta=<raw-startup> delay_cycles=<value> timeout=<0/1>");
+    rprintln!("button=<0/1> pot_raw=<raw> pot_pct=<pct> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> op*_delta=<raw-startup> timeout=<0/1>");
     rprintln!("================================================");
 
     led_low();
 
     loop {
-        let pot_raw = adc1_read_channel_raw(POT_ADC_CHANNEL);
-        let temp_raw = adc1_read_channel_raw(TEMP_ADC_CHANNEL);
-        let vbus_raw = adc1_read_channel_raw(VBUS_ADC_CHANNEL);
+        let pot_raw = adc_read_channel_raw(ADC1_BASE, POT_ADC_CHANNEL);
+        let temp_raw = adc_read_channel_raw(ADC1_BASE, TEMP_ADC_CHANNEL);
+        let vbus_raw = adc_read_channel_raw(ADC1_BASE, VBUS_ADC_CHANNEL);
+
+        let op1_raw = adc_read_channel_raw(ADC1_BASE, OP1_OUT_ADC_CHANNEL);
+        let op2_raw = adc_read_channel_raw(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
+        let op3_raw = adc_read_channel_raw(ADC1_BASE, OP3_OUT_ADC_CHANNEL);
 
         let pot_timeout = pot_raw == ADC_TIMEOUT_VALUE;
         let temp_timeout = temp_raw == ADC_TIMEOUT_VALUE;
         let vbus_timeout = vbus_raw == ADC_TIMEOUT_VALUE;
-        let timeout = pot_timeout || temp_timeout || vbus_timeout;
+        let op1_timeout = op1_raw == ADC_TIMEOUT_VALUE;
+        let op2_timeout = op2_raw == ADC_TIMEOUT_VALUE;
+        let op3_timeout = op3_raw == ADC_TIMEOUT_VALUE;
+
+        let timeout = pot_timeout
+            || temp_timeout
+            || vbus_timeout
+            || op1_timeout
+            || op2_timeout
+            || op3_timeout;
 
         let live_pot_raw = if pot_timeout { 2048 } else { pot_raw };
         let live_temp_raw = if temp_timeout { temp_startup_raw } else { temp_raw };
         let live_vbus_raw = if vbus_timeout { vbus_startup_raw } else { vbus_raw };
 
+        let live_op1_raw = if op1_timeout { op1_startup_raw } else { op1_raw };
+        let live_op2_raw = if op2_timeout { op2_startup_raw } else { op2_raw };
+        let live_op3_raw = if op3_timeout { op3_startup_raw } else { op3_raw };
+
         let pot_pct = adc_live_percent(live_pot_raw);
         let temp_delta = adc_delta(live_temp_raw, temp_startup_raw);
         let vbus_delta = adc_delta(live_vbus_raw, vbus_startup_raw);
+
+        let op1_delta = adc_delta(live_op1_raw, op1_startup_raw);
+        let op2_delta = adc_delta(live_op2_raw, op2_startup_raw);
+        let op3_delta = adc_delta(live_op3_raw, op3_startup_raw);
+
         let delay = pot_to_delay(live_pot_raw);
 
         if button_pressed() {
             rprintln!(
-                "button=1 pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} delay_cycles={} timeout={} mode=button_fast",
+                "button=1 pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
                 live_pot_raw,
                 pot_pct,
                 live_temp_raw,
                 temp_delta,
                 live_vbus_raw,
                 vbus_delta,
+                live_op1_raw,
+                op1_delta,
+                live_op2_raw,
+                op2_delta,
+                live_op3_raw,
+                op3_delta,
                 650_000,
                 if timeout { 1 } else { 0 }
             );
@@ -457,13 +596,19 @@ fn main() -> ! {
             blink_fast_button_override();
         } else {
             rprintln!(
-                "button=0 pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} delay_cycles={} timeout={} mode=pot_control",
+                "button=0 pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
                 live_pot_raw,
                 pot_pct,
                 live_temp_raw,
                 temp_delta,
                 live_vbus_raw,
                 vbus_delta,
+                live_op1_raw,
+                op1_delta,
+                live_op2_raw,
+                op2_delta,
+                live_op3_raw,
+                op3_delta,
                 delay,
                 if timeout { 1 } else { 0 }
             );
@@ -476,7 +621,7 @@ fn main() -> ! {
 // ================================================================
 // Footer
 // File: main.rs
-// Version: v0.1.8-pa0-vbus-raw-monitor
+// Version: v0.1.9-opamp-output-raw-monitor
 // Created: 2026-06-07
 // Generated timestamp: 2026-06-07
 // ================================================================
