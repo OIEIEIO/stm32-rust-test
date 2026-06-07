@@ -1,8 +1,8 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.2.4-tim1-moe-on-ccer-off
-// Purpose: STM32G431CB Rust bring-up: enable TIM1 MOE while keeping CCER outputs disabled
+// Version: v0.2.5-fix1-tim1-forced-inactive-all-low
+// Purpose: STM32G431CB Rust bring-up: TIM1 forced-inactive outputs with CCER=enabled, MOE=enabled, and all drive pins low
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 // ================================================================
 
@@ -104,6 +104,24 @@ const TIM1_EGR_UG: u32 = 1 << 0;
 const TIM1_BDTR_OSSI: u32 = 1 << 10;
 const TIM1_BDTR_OSSR: u32 = 1 << 11;
 const TIM1_BDTR_MOE: u32 = 1 << 15;
+
+const TIM1_CCMR_FORCED_INACTIVE: u32 = 0b100;
+
+// Enables all 6 outputs and inverts complementary N outputs.
+// Observed v0.2.5 result with CCxNP=0:
+//   UH/VH/WH low, but UL/VL/WL high.
+// This fix sets CC1NP/CC2NP/CC3NP so forced-inactive reads all six low.
+// Decimal expected value: 3549.
+const TIM1_CCER_FORCED_INACTIVE_ALL_LOW: u32 =
+    (1 << 0) |   // CC1E
+    (1 << 2) |   // CC1NE
+    (1 << 3) |   // CC1NP
+    (1 << 4) |   // CC2E
+    (1 << 6) |   // CC2NE
+    (1 << 7) |   // CC2NP
+    (1 << 8) |   // CC3E
+    (1 << 10) |  // CC3NE
+    (1 << 11);   // CC3NP
 
 const TIM1_TEST_PSC: u32 = 0;
 const TIM1_TEST_ARR: u32 = 3999;
@@ -218,6 +236,7 @@ struct DriveAfReadback {
     wl_af: u32,
 
     af_ok: u32,
+    pins_low: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -225,7 +244,6 @@ struct Tim1Readback {
     cnt_a: u32,
     cnt_b: u32,
     counting: u32,
-    psc: u32,
     arr: u32,
     ccr1: u32,
     ccr2: u32,
@@ -233,10 +251,14 @@ struct Tim1Readback {
     ccer: u32,
     bdtr: u32,
     cr2: u32,
+    ccmr1: u32,
+    ccmr2: u32,
     moe: u32,
     ossi: u32,
     ossr: u32,
-    safety_ok: u32,
+    ccer_expected: u32,
+    forced_inactive_ok: u32,
+    tim1_register_ok: u32,
 }
 
 // ------------------------------------------------------------
@@ -368,6 +390,18 @@ fn read_drive_af() -> DriveAfReadback {
         0
     };
 
+    let pins_low = if uh_pin == 0
+        && ul_pin == 0
+        && vh_pin == 0
+        && vl_pin == 0
+        && wh_pin == 0
+        && wl_pin == 0
+    {
+        1
+    } else {
+        0
+    };
+
     DriveAfReadback {
         uh_pin,
         ul_pin,
@@ -388,6 +422,7 @@ fn read_drive_af() -> DriveAfReadback {
         wh_af,
         wl_af,
         af_ok,
+        pins_low,
     }
 }
 
@@ -407,20 +442,37 @@ fn delay_fast_button() {
 // TIM1 helpers
 // ------------------------------------------------------------
 
-fn enforce_tim1_moe_on_ccer_off() {
+fn set_tim1_forced_inactive_modes() {
+    unsafe {
+        // OC1M = forced inactive, OC2M = forced inactive.
+        let ccmr1 =
+            (TIM1_CCMR_FORCED_INACTIVE << 4) |
+            (TIM1_CCMR_FORCED_INACTIVE << 12);
+
+        // OC3M = forced inactive.
+        let ccmr2 = TIM1_CCMR_FORCED_INACTIVE << 4;
+
+        write_volatile(TIM1_CCMR1, ccmr1);
+        write_volatile(TIM1_CCMR2, ccmr2);
+    }
+}
+
+fn enforce_tim1_forced_inactive_all_low() {
     unsafe {
         write_volatile(TIM1_CCR1, 0);
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
-        // Key safety point for this version:
-        // MOE is ON, but CCER remains OFF.
-        write_volatile(TIM1_CCER, 0);
+        set_tim1_forced_inactive_modes();
+
+        // CCER enabled with complementary outputs inverted.
+        // Expected all six drive inputs low in forced-inactive mode.
+        write_volatile(TIM1_CCER, TIM1_CCER_FORCED_INACTIVE_ALL_LOW);
 
         let mut bdtr = read_volatile(TIM1_BDTR);
-        bdtr |= TIM1_BDTR_MOE;
         bdtr |= TIM1_BDTR_OSSI;
         bdtr |= TIM1_BDTR_OSSR;
+        bdtr |= TIM1_BDTR_MOE;
         write_volatile(TIM1_BDTR, bdtr);
     }
 }
@@ -431,7 +483,6 @@ fn read_tim1() -> Tim1Readback {
         asm::delay(16_000);
         let cnt_b = read_volatile(TIM1_CNT);
 
-        let psc = read_volatile(TIM1_PSC);
         let arr = read_volatile(TIM1_ARR);
         let ccr1 = read_volatile(TIM1_CCR1);
         let ccr2 = read_volatile(TIM1_CCR2);
@@ -439,19 +490,41 @@ fn read_tim1() -> Tim1Readback {
         let ccer = read_volatile(TIM1_CCER);
         let bdtr = read_volatile(TIM1_BDTR);
         let cr2 = read_volatile(TIM1_CR2);
+        let ccmr1 = read_volatile(TIM1_CCMR1);
+        let ccmr2 = read_volatile(TIM1_CCMR2);
 
         let counting = if cnt_a != cnt_b { 1 } else { 0 };
         let moe = if (bdtr & TIM1_BDTR_MOE) != 0 { 1 } else { 0 };
         let ossi = if (bdtr & TIM1_BDTR_OSSI) != 0 { 1 } else { 0 };
         let ossr = if (bdtr & TIM1_BDTR_OSSR) != 0 { 1 } else { 0 };
 
+        let ccer_expected = if ccer == TIM1_CCER_FORCED_INACTIVE_ALL_LOW {
+            1
+        } else {
+            0
+        };
+
+        let oc1m = (ccmr1 >> 4) & 0b111;
+        let oc2m = (ccmr1 >> 12) & 0b111;
+        let oc3m = (ccmr2 >> 4) & 0b111;
+
+        let forced_inactive_ok = if oc1m == TIM1_CCMR_FORCED_INACTIVE
+            && oc2m == TIM1_CCMR_FORCED_INACTIVE
+            && oc3m == TIM1_CCMR_FORCED_INACTIVE
+        {
+            1
+        } else {
+            0
+        };
+
         let idle_bits = (cr2 >> 8) & 0b11_1111;
 
-        let safety_ok = if counting == 1
-            && ccer == 0
+        let tim1_register_ok = if counting == 1
+            && ccer_expected == 1
             && moe == 1
             && ossi == 1
             && ossr == 1
+            && forced_inactive_ok == 1
             && idle_bits == 0
             && ccr1 == 0
             && ccr2 == 0
@@ -466,7 +539,6 @@ fn read_tim1() -> Tim1Readback {
             cnt_a,
             cnt_b,
             counting,
-            psc,
             arr,
             ccr1,
             ccr2,
@@ -474,15 +546,19 @@ fn read_tim1() -> Tim1Readback {
             ccer,
             bdtr,
             cr2,
+            ccmr1,
+            ccmr2,
             moe,
             ossi,
             ossr,
-            safety_ok,
+            ccer_expected,
+            forced_inactive_ok,
+            tim1_register_ok,
         }
     }
 }
 
-fn setup_tim1_moe_on_ccer_off() {
+fn setup_tim1_forced_inactive_all_low() {
     unsafe {
         let apb2enr = read_volatile(RCC_APB2ENR);
         write_volatile(RCC_APB2ENR, apb2enr | RCC_APB2ENR_TIM1EN);
@@ -504,19 +580,12 @@ fn setup_tim1_moe_on_ccer_off() {
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
-        // PWM mode 1 internally for CH1/CH2/CH3, preload enabled.
-        // CCER remains 0, so this does not intentionally enable pin output.
-        let ccmr1 = (0b110 << 4) | (1 << 3) | (0b110 << 12) | (1 << 11);
-        let ccmr2 = (0b110 << 4) | (1 << 3);
-
-        write_volatile(TIM1_CCMR1, ccmr1);
-        write_volatile(TIM1_CCMR2, ccmr2);
+        set_tim1_forced_inactive_modes();
 
         write_volatile(TIM1_EGR, TIM1_EGR_UG);
-
         write_volatile(TIM1_CR1, TIM1_CR1_ARPE | TIM1_CR1_CEN);
 
-        enforce_tim1_moe_on_ccer_off();
+        enforce_tim1_forced_inactive_all_low();
     }
 }
 
@@ -691,7 +760,6 @@ fn setup_gpio_base() {
 
 fn setup_drive_pins_tim1_af() {
     unsafe {
-        // Keep CC outputs disabled while assigning AF pins.
         write_volatile(TIM1_CCER, 0);
 
         let mut bdtr = read_volatile(TIM1_BDTR);
@@ -869,15 +937,23 @@ fn main() -> ! {
     rtt_init_print!();
 
     setup_gpio_base();
-    setup_tim1_moe_on_ccer_off();
+    setup_tim1_forced_inactive_all_low();
     setup_drive_pins_tim1_af();
 
-    enforce_tim1_moe_on_ccer_off();
+    enforce_tim1_forced_inactive_all_low();
 
     let (adc1_setup_status, adc2_setup_status) = setup_adc_for_board_monitor();
 
     let drive_startup = read_drive_af();
     let tim1_startup = read_tim1();
+    let startup_overall_safe = if drive_startup.af_ok == 1
+        && drive_startup.pins_low == 1
+        && tim1_startup.tim1_register_ok == 1
+    {
+        1
+    } else {
+        0
+    };
 
     let temp_startup_raw = adc_read_channel_raw(ADC1_BASE, TEMP_ADC_CHANNEL);
     let vbus_startup_raw = adc_read_channel_raw(ADC1_BASE, VBUS_ADC_CHANNEL);
@@ -888,16 +964,18 @@ fn main() -> ! {
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.2.4-tim1-moe-on-ccer-off");
+    rprintln!("Version: v0.2.5-fix1-tim1-forced-inactive-all-low");
     rprintln!("Drive pins are TIM1 alternate function.");
-    rprintln!("TIM1 MOE is ON, but CCER is OFF.");
-    rprintln!("No intentional gate switching in this version.");
+    rprintln!("TIM1 mode: forced inactive, CCER enabled, MOE enabled.");
+    rprintln!("Complementary output polarity inverted so UH/UL/VH/VL/WH/WL should all read low.");
+    rprintln!("No PWM duty and no intentional switching in this version.");
     rprintln!("ADC1 setup status: {}", adc1_setup_status);
     rprintln!("ADC2 setup status: {}", adc2_setup_status);
 
     rprintln!(
-        "drive_startup: af_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} UH_mode={} UL_mode={} VH_mode={} VL_mode={} WH_mode={} WL_mode={} UH_af={} UL_af={} VH_af={} VL_af={} WH_af={} WL_af={}",
+        "drive_startup: af_ok={} pins_low={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} UH_mode={} UL_mode={} VH_mode={} VL_mode={} WH_mode={} WL_mode={} UH_af={} UL_af={} VH_af={} VL_af={} WH_af={} WL_af={}",
         drive_startup.af_ok,
+        drive_startup.pins_low,
         drive_startup.uh_pin,
         drive_startup.ul_pin,
         drive_startup.vh_pin,
@@ -919,22 +997,26 @@ fn main() -> ! {
     );
 
     rprintln!(
-        "tim1_startup: safety_ok={} counting={} cnt_a={} cnt_b={} psc={} arr={} ccr1={} ccr2={} ccr3={} ccer={} bdtr={} cr2={} moe={} ossi={} ossr={}",
-        tim1_startup.safety_ok,
+        "tim1_startup: startup_overall_safe={} tim1_register_ok={} counting={} cnt_a={} cnt_b={} arr={} ccr1={} ccr2={} ccr3={} ccer={} ccer_expected={} bdtr={} cr2={} ccmr1={} ccmr2={} moe={} ossi={} ossr={} forced_inactive_ok={}",
+        startup_overall_safe,
+        tim1_startup.tim1_register_ok,
         tim1_startup.counting,
         tim1_startup.cnt_a,
         tim1_startup.cnt_b,
-        tim1_startup.psc,
         tim1_startup.arr,
         tim1_startup.ccr1,
         tim1_startup.ccr2,
         tim1_startup.ccr3,
         tim1_startup.ccer,
+        tim1_startup.ccer_expected,
         tim1_startup.bdtr,
         tim1_startup.cr2,
+        tim1_startup.ccmr1,
+        tim1_startup.ccmr2,
         tim1_startup.moe,
         tim1_startup.ossi,
-        tim1_startup.ossr
+        tim1_startup.ossr,
+        tim1_startup.forced_inactive_ok
     );
 
     rprintln!("temp_startup_raw: {}", temp_startup_raw);
@@ -943,16 +1025,22 @@ fn main() -> ! {
     rprintln!("op2_startup_raw: {}", op2_startup_raw);
     rprintln!("op3_startup_raw: {}", op3_startup_raw);
     rprintln!("Output format:");
-    rprintln!("button=<0/1> safety_ok=<0/1> af_ok=<0/1> tim1_counting=<0/1> tim1_ccer=<raw> tim1_moe=<0/1> tim1_ossi=<0/1> tim1_ossr=<0/1> pot_raw=<raw> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> timeout=<0/1>");
+    rprintln!("button=<0/1> overall_safe=<0/1> tim1_register_ok=<0/1> af_ok=<0/1> pins_low=<0/1> tim1_counting=<0/1> tim1_ccer=<raw> tim1_moe=<0/1> forced_inactive_ok=<0/1> pot_raw=<raw> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> timeout=<0/1>");
     rprintln!("================================================");
 
     led_low();
 
     loop {
-        enforce_tim1_moe_on_ccer_off();
+        enforce_tim1_forced_inactive_all_low();
 
         let drive = read_drive_af();
         let tim1 = read_tim1();
+
+        let overall_safe = if drive.af_ok == 1 && drive.pins_low == 1 && tim1.tim1_register_ok == 1 {
+            1
+        } else {
+            0
+        };
 
         let pot_raw = adc_read_channel_raw(ADC1_BASE, POT_ADC_CHANNEL);
         let temp_raw = adc_read_channel_raw(ADC1_BASE, TEMP_ADC_CHANNEL);
@@ -996,9 +1084,11 @@ fn main() -> ! {
 
         if button_pressed() {
             rprintln!(
-                "button=1 safety_ok={} af_ok={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_bdtr={} tim1_cr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
-                tim1.safety_ok,
+                "button=1 overall_safe={} tim1_register_ok={} af_ok={} pins_low={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_inactive_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
+                overall_safe,
+                tim1.tim1_register_ok,
                 drive.af_ok,
+                drive.pins_low,
                 tim1.counting,
                 tim1.cnt_a,
                 tim1.cnt_b,
@@ -1007,11 +1097,15 @@ fn main() -> ! {
                 tim1.ccr2,
                 tim1.ccr3,
                 tim1.ccer,
+                tim1.ccer_expected,
                 tim1.bdtr,
                 tim1.cr2,
+                tim1.ccmr1,
+                tim1.ccmr2,
                 tim1.moe,
                 tim1.ossi,
                 tim1.ossr,
+                tim1.forced_inactive_ok,
                 drive.uh_pin,
                 drive.ul_pin,
                 drive.vh_pin,
@@ -1037,9 +1131,11 @@ fn main() -> ! {
             blink_fast_button_override();
         } else {
             rprintln!(
-                "button=0 safety_ok={} af_ok={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_bdtr={} tim1_cr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
-                tim1.safety_ok,
+                "button=0 overall_safe={} tim1_register_ok={} af_ok={} pins_low={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_inactive_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
+                overall_safe,
+                tim1.tim1_register_ok,
                 drive.af_ok,
+                drive.pins_low,
                 tim1.counting,
                 tim1.cnt_a,
                 tim1.cnt_b,
@@ -1048,11 +1144,15 @@ fn main() -> ! {
                 tim1.ccr2,
                 tim1.ccr3,
                 tim1.ccer,
+                tim1.ccer_expected,
                 tim1.bdtr,
                 tim1.cr2,
+                tim1.ccmr1,
+                tim1.ccmr2,
                 tim1.moe,
                 tim1.ossi,
                 tim1.ossr,
+                tim1.forced_inactive_ok,
                 drive.uh_pin,
                 drive.ul_pin,
                 drive.vh_pin,
@@ -1083,7 +1183,7 @@ fn main() -> ! {
 // ================================================================
 // Footer
 // File: main.rs
-// Version: v0.2.4-tim1-moe-on-ccer-off
+// Version: v0.2.5-fix1-tim1-forced-inactive-all-low
 // Created: 2026-06-07
 // Generated timestamp: 2026-06-07
 // ================================================================

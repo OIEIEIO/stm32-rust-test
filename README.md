@@ -1,158 +1,231 @@
-<!--
-File: README.md
-Path: ~/stm32-rust-test/b-g431b-esc1-rust/README.md
-Version: v0.2.4-tim1-moe-on-ccer-off
-Purpose: Project notes and bring-up roadmap for Rust firmware on the B-G431B-ESC1 / STM32G431CB ESC board
-Created: 2026-06-07
-Generated timestamp: 2026-06-07
--->
+# B-G431B-ESC1 Rust Bring-up
 
-# STM32 Rust Test — B-G431B-ESC1 ESC Bring-up
+Rust bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
 
-Rust firmware bring-up project for the **ST B-G431B-ESC1 Discovery ESC board**.
-
-The goal is to learn the board step by step, starting with safe GPIO and ADC tests, then progressing toward TIM1 motor-control setup, gate-driver bring-up, and eventually spinning a small BLDC motor.
-
-## Board Understanding
-
-This development board has two major sections:
+Current confirmed milestone:
 
 ```text
-USB / ST-LINK section
-  - Provides USB connection to the PC
-  - Acts as debugger / programmer
-  - Supports probe-rs, cargo-embed, SWD, and RTT output
-  - Not the MCU being programmed by this project
-
-ESC / target section
-  - Contains the STM32G431CB target MCU
-  - Contains motor-control hardware, L6387 gate drivers, MOSFETs, sensors, shunts, and board I/O
-  - This is the MCU running the Rust firmware
+v0.2.5-fix1-tim1-forced-inactive-all-low
 ```
 
-We are writing firmware for:
+This project is currently focused on safe, step-by-step board bring-up before attempting to spin a BLDC motor.
+
+---
+
+## Hardware
+
+Board:
+
+```text
+ST B-G431B-ESC1 Discovery kit
+STM32G431CB MCU
+L6387 gate drivers
+STL180N6F7 MOSFETs
+```
+
+Development/debug:
+
+```text
+ST-LINK/V2-1
+probe-rs / cargo-embed
+RTT logging
+Ubuntu host
+```
+
+Current target:
+
+```text
+thumbv7em-none-eabihf
+```
+
+Confirmed probe:
 
 ```text
 STM32G431CB
-Cortex-M4F
-128 KiB Flash
-32 KiB SRAM
-Rust target: thumbv7em-none-eabihf
+chipid: 0x468
+flash: 128 KiB
+sram: 32 KiB
 ```
 
-## Current Confirmed Milestone
+---
 
-Current firmware version:
+## Useful commands
+
+Build:
+
+```bash
+cargo build --release
+```
+
+Flash/run:
+
+```bash
+cargo embed --release
+```
+
+Attach RTT monitor without reflashing:
+
+```bash
+probe-rs attach --chip STM32G431CB target/thumbv7em-none-eabihf/release/b-g431b-esc1-rust
+```
+
+---
+
+## Confirmed board signals
+
+From schematic and bring-up testing:
 
 ```text
-v0.2.4-tim1-moe-on-ccer-off
+PC6   STATUS LED
+PC10  user button input
+PB12  potentiometer / ADC1_IN11
+PB14  temperature feedback / ADC1_IN5
+PA0   VBUS feedback / ADC1_IN1
+PA2   OP1_OUT current monitor / ADC1_IN3
+PA6   OP2_OUT current monitor / ADC2_IN3
+PB1   OP3_OUT current monitor / ADC1_IN12
 ```
 
-Confirmed working:
+TIM1 drive outputs:
 
 ```text
-- ST-LINK detection
-- probe-rs flashing
-- cargo-embed RTT terminal output
-- Rust no_std firmware boot
-- linker/memory.x setup
-- PC6 STATUS LED output
-- PC10 user button input
-- PB12 potentiometer ADC input
-- PB14 raw temperature feedback ADC input
-- PA0 raw VBUS feedback ADC input
-- OP1/OP2/OP3 raw current-feedback monitor
-- TIM1 internal counter setup
-- TIM1 drive pins moved to alternate-function mode
-- TIM1 CCER enabled milestone passed in v0.2.3-fix1 with MOE off
-- TIM1 MOE can be enabled while CCER remains off
-- TIM1 telemetry/readback continues working over RTT
+PA8   UH / TIM1_CH1
+PC13  UL / TIM1_CH1N
+PA9   VH / TIM1_CH2
+PA12  VL / TIM1_CH2N
+PA10  WH / TIM1_CH3
+PB15  WL / TIM1_CH3N
 ```
 
-## Confirmed Board Pin Notes
-
-From schematic inspection and testing:
+Confirmed alternate functions used:
 
 ```text
-PC6   = STATUS LED output
-PC10  = user button input, active-low
-PB12  = potentiometer input / ADC1_IN11
-PB14  = temperature feedback / ADC1_IN5
-PA0   = VBUS feedback / ADC1_IN1
-PA2   = OP1_OUT raw monitor / ADC1_IN3
-PA6   = OP2_OUT raw monitor / ADC2_IN3
-PB1   = OP3_OUT raw monitor / ADC1_IN12
+PA8   AF6
+PA9   AF6
+PA10  AF6
+PA12  AF6
+PB15  AF4
+PC13  AF4
 ```
 
-Observed potentiometer behavior:
+---
+
+## Bring-up history
+
+### v0.1.x GPIO / ADC / RTT
+
+Confirmed:
 
 ```text
-pot far right  = low ADC value, near 0
-pot far left   = high ADC value, up to 4095
+PC6 LED output works.
+PC10 button input works.
+PB12 potentiometer ADC works.
+PB14 temperature feedback ADC works.
+PA0 VBUS feedback ADC works.
+PA2/PA6/PB1 op-amp/current monitor raw ADC readings work.
+RTT logging works through probe-rs.
 ```
 
-Observed temperature feedback behavior:
+Observed behavior:
 
 ```text
-PB14 temp_raw increases when the ESC board is warmed by hand
-PB14 temp_raw falls back toward ambient after release
+Potentiometer controls LED blink rate.
+Temperature raw value rises when the ESC board is warmed by hand.
+VBUS raw value rises when external ESC power input is raised.
 ```
 
-Observed VBUS behavior:
+---
+
+### v0.2.0 drive pins safe-low
+
+Confirmed all six L6387 input pins can be configured as GPIO outputs and held low:
 
 ```text
-USB-only / USB backfeed: approximately 4.73 V seen at ESC input, vbus_raw around 577
-Bench supply around 10 V: vbus_raw around 1214
-Rough bench-derived scale: about 121 ADC counts per volt
-Treat this as approximate until schematic divider values are confirmed
+UH=0
+UL=0
+VH=0
+VL=0
+WH=0
+WL=0
+drive_safe=1
 ```
 
-Observed zero-current raw op-amp offsets, no motor/load:
+No motor connected.
+
+---
+
+### v0.2.1 TIM1 internal counter, MOE off
+
+Confirmed TIM1 can be configured and run internally while drive pins remain GPIO LOW.
+
+Expected/confirmed fields:
 
 ```text
-OP1 raw around 1590-1600 range
-OP2 raw around 1590-2000 range depending on run/version/readback state
-OP3 raw around 1420-1520 range depending on run/version/readback state
-These are raw zero-current baselines, not calibrated current values
+tim1_counting=1
+tim1_arr=3999
+tim1_ccr1=0
+tim1_ccr2=0
+tim1_ccr3=0
+tim1_ccer=0
+tim1_moe=0
+drive_safe=1
 ```
 
-## TIM1 / Gate Driver Mapping
+No motor connected.
 
-From schematic inspection:
+---
+
+### v0.2.2 TIM1 alternate-function pins, MOE off
+
+Confirmed the six drive pins can be moved to TIM1 alternate-function mode while TIM1 outputs remain disabled.
+
+Expected/confirmed fields:
 
 ```text
-U phase:
-  PA8   = UH = TIM1_CH1  -> L6387 HIN
-  PC13  = UL = TIM1_CH1N -> L6387 LIN
-  output = OUT1
-
-V phase:
-  PA9   = VH = TIM1_CH2  -> L6387 HIN
-  PA12  = VL = TIM1_CH2N -> L6387 LIN
-  output = OUT2
-
-W phase:
-  PA10  = WH = TIM1_CH3  -> L6387 HIN
-  PB15  = WL = TIM1_CH3N -> L6387 LIN
-  output = OUT3
+af_ok=1
+tim1_counting=1
+tim1_ccer=0
+tim1_moe=0
+UH_af=6
+VH_af=6
+WH_af=6
+VL_af=6
+WL_af=4
+UL_af=4
 ```
 
-The L6387 inputs appear driven directly from STM32G431 TIM1 complementary outputs. No separate gate-driver enable/fault pin has been identified in the reviewed schematic crop.
+No motor connected.
 
-## Current v0.2.4 Behavior
+---
 
-This version keeps the power stage in a non-switching test state:
+### v0.2.3-fix1 TIM1 CCER enabled, MOE off
+
+Confirmed TIM1 CC output enable bits can be configured while the main output enable remains off.
+
+Expected/confirmed fields:
 
 ```text
-Drive pins are TIM1 alternate function.
-TIM1 counter is running.
-TIM1 MOE is ON.
-TIM1 CCER is OFF.
-TIM1 CCR1/CCR2/CCR3 remain 0.
-No intentional gate switching in this version.
+safety_ok=1
+af_ok=1
+tim1_counting=1
+tim1_ccer=1365
+tim1_ccer_expected=1
+tim1_moe=0
+tim1_ossi=1
+tim1_ccr1=0
+tim1_ccr2=0
+tim1_ccr3=0
 ```
 
-Expected confirmed fields from RTT:
+No motor connected.
+
+---
+
+### v0.2.4 TIM1 MOE on, CCER off
+
+Confirmed TIM1 main output enable can be set while CCER remains disabled.
+
+Expected/confirmed fields:
 
 ```text
 safety_ok=1
@@ -165,272 +238,147 @@ tim1_ossr=1
 tim1_ccr1=0
 tim1_ccr2=0
 tim1_ccr3=0
-UH/VH/WH/VL/WL/UL pin readbacks = 0
 ```
 
-This proves that MOE can be enabled while capture/compare output enables remain disabled. It does **not** yet intentionally switch MOSFET gates.
+No motor connected.
 
-## Useful Commands
+---
 
-Detect ST-LINK:
+### v0.2.5 first attempt: forced inactive, CCER on, MOE on
 
-```bash
-probe-rs list
-```
-
-Detect STM32 with stlink tools:
-
-```bash
-st-info --probe
-```
-
-Build release firmware:
-
-```bash
-cargo build --release
-```
-
-Flash and run with probe-rs:
-
-```bash
-cargo run --release
-```
-
-Flash and monitor RTT:
-
-```bash
-cargo embed --release
-```
-
-Attach to already-running firmware without reflashing:
-
-```bash
-probe-rs attach --chip STM32G431CB target/thumbv7em-none-eabihf/release/b-g431b-esc1-rust
-```
-
-Exit RTT/probe session:
+Important finding:
 
 ```text
-Ctrl-C
+Forced inactive with normal complementary polarity did not make all six drive inputs low.
+UH/VH/WH were low, but UL/VL/WL read high.
 ```
 
-## Current Project Files
+This version was not treated as a passed milestone.
+
+---
+
+### v0.2.5-fix1 forced inactive all-low
+
+Current confirmed version:
 
 ```text
-b-g431b-esc1-rust/
-├── .cargo/
-│   └── config.toml
-├── Cargo.toml
-├── Cargo.lock
-├── Embed.toml
-├── build.rs
-├── memory.x
-├── README.md
-└── src/
-    └── main.rs
+v0.2.5-fix1-tim1-forced-inactive-all-low
 ```
 
-## Safety Rules
-
-Early bring-up must avoid uncontrolled motor-control hardware behavior.
-
-Do not connect:
+This version:
 
 ```text
-- propeller
-- phase-to-phase resistor load during non-switching firmware
-- motor unless the firmware version explicitly calls for first-spin testing
+TIM1 pins are alternate function.
+TIM1 counter is running.
+CCER is enabled.
+MOE is enabled.
+Channels are forced inactive.
+Complementary output polarity is inverted so all six drive inputs read low.
+CCR1/2/3 remain zero.
+No PWM duty is applied.
+No intentional gate switching is commanded.
 ```
 
-Current v0.2.4 safe-tested state:
+Expected/confirmed fields:
 
 ```text
-USB-only test passed
-bench supply may remain off for this milestone
-TIM1 MOE on, CCER off
-no intentional gate switching
+startup_overall_safe=1
+overall_safe=1
+tim1_register_ok=1
+af_ok=1
+pins_low=1
+tim1_counting=1
+tim1_ccer=3549
+tim1_ccer_expected=1
+tim1_moe=1
+tim1_ossi=1
+tim1_ossr=1
+forced_inactive_ok=1
+
+UH_pin=0
+UL_pin=0
+VH_pin=0
+VL_pin=0
+WH_pin=0
+WL_pin=0
 ```
 
-For future powered ESC tests:
+External VBUS no-motor test:
 
 ```text
-Use current-limited bench supply
-Start at low voltage/current
-No propeller
-Keep hands clear of motor shaft and leads
-Stop immediately if current jumps, board heats, ST-LINK disconnects, or unexpected behavior occurs
+Bench supply was applied up to about 10 V.
+Motor disconnected.
+Board stayed cold.
+Supply current appeared negligible.
+VBUS ADC responded correctly and returned to USB baseline when supply was lowered/removed.
 ```
 
-## Bring-up Roadmap
-
-### Stage 1 — Completed
-
-Basic Rust firmware pipeline:
+Observed VBUS behavior from logs:
 
 ```text
-- backup original flash
-- configure Rust target
-- create no_std project
-- memory.x linker setup
-- flash with probe-rs
-- blink PC6 STATUS LED
+vbus_raw around 1200  -> external VBUS near 10 V
+vbus_raw around 991   -> supply lowered
+vbus_raw around 657   -> supply lowered further
+vbus_raw around 577   -> back near USB baseline
 ```
 
-### Stage 2 — Completed
+This is the current safe milestone before any active-output experiment.
 
-Basic GPIO input:
+---
+
+## Current safety rule
+
+Do not connect a motor for the current version.
+
+Current version is only a forced-inactive full-output-path validation:
 
 ```text
-- configure PC10 button input
-- confirm active-low behavior
-- use button to change LED blink pattern
+TIM1 AF pins active
+CCER enabled
+MOE enabled
+forced inactive mode
+all six drive inputs low
+no PWM duty
+no intentional switching
 ```
 
-### Stage 3 — Completed
+---
 
-Basic ADC input:
+## Next likely step
+
+Next step should be discussed before coding.
+
+Recommended next technical direction:
 
 ```text
-- configure PB12 as analog input
-- enable ADC1
-- read ADC1_IN11
-- print live ADC values over RTT
-- use potentiometer to control blink speed
+First active-output test with no motor connected.
+Very limited output pattern.
+Current-limited bench supply.
+Likely one low-side output only.
+Telemetry must continue to show VBUS/current monitor behavior.
+Stop on any heat, current jump, unexpected pin state, or unsafe log field.
 ```
 
-### Stage 4 — Completed
+A motor spin test comes later.
 
-Temperature feedback raw monitor:
+---
+
+## Commit/tag convention
+
+Use version tags matching the tested firmware milestone, for example:
 
 ```text
-- configure PB14 as analog input
-- read ADC1_IN5
-- print temp_raw and temp_delta
-- confirm raw value increases when board is warmed by hand
+v0.2.5-fix1-tim1-forced-inactive-all-low
 ```
 
-### Stage 5 — Completed
+---
 
-VBUS raw monitor:
+## Status
+
+Current status:
 
 ```text
-- configure PA0 as analog input
-- read ADC1_IN1
-- confirm vbus_raw changes with ESC input voltage
-- bench-derived rough scale around 121 counts/volt
+v0.2.5-fix1 passed on USB-only.
+v0.2.5-fix1 passed with external VBUS up to about 10 V, no motor.
+Ready to commit before moving toward first active-output testing.
 ```
-
-### Stage 6 — Completed
-
-Raw current-feedback op-amp output monitor:
-
-```text
-- PA2 OP1_OUT / ADC1_IN3
-- PA6 OP2_OUT / ADC2_IN3
-- PB1 OP3_OUT / ADC1_IN12
-- confirm stable zero-current raw offsets
-```
-
-### Stage 7 — Completed
-
-Drive pins safe-low GPIO state:
-
-```text
-- configure UH/UL/VH/VL/WH/WL pins as GPIO outputs
-- force all six LOW
-- confirm STM32 register/readback state
-```
-
-### Stage 8 — Completed
-
-TIM1 internal counter, outputs disabled:
-
-```text
-- enable TIM1 clock
-- configure PSC/ARR/CCR registers
-- start internal counter
-- keep CCER = 0
-- keep BDTR.MOE = 0
-- keep drive pins GPIO LOW
-```
-
-### Stage 9 — Completed
-
-TIM1 alternate-function pins, MOE off:
-
-```text
-- move six drive pins to TIM1 AF
-- verify AF mapping:
-  PA8/PA9/PA10/PA12 = AF6
-  PB15/PC13 = AF4
-- keep CCER = 0
-- keep BDTR.MOE = 0
-```
-
-### Stage 10 — Completed
-
-TIM1 CCER enabled, MOE off:
-
-```text
-- TIM1 owns six drive pins
-- enable CCER bits for CH1/1N/2/2N/3/3N
-- keep BDTR.MOE = 0
-- keep CCR1/2/3 = 0
-- confirm safety_ok=1 in v0.2.3-fix1
-```
-
-### Stage 11 — Completed
-
-TIM1 MOE on, CCER off:
-
-```text
-- TIM1 pins remain AF
-- TIM1 counter running
-- BDTR.MOE = 1
-- CCER = 0
-- CCR1/2/3 = 0
-- no intentional gate switching
-```
-
-### Stage 12 — Next Suggested Step
-
-TIM1 forced-inactive outputs with MOE and CCER enabled:
-
-```text
-v0.2.5-tim1-forced-inactive-ccer-on-moe-on
-
-Goal:
-- pins remain TIM1 AF
-- channels configured forced inactive
-- CCER enabled
-- MOE enabled
-- no PWM duty
-- no motor yet
-- verify no current jump under safe test conditions
-```
-
-After this, the next larger step would be a carefully designed first low-duty or forced-state hardware test with current-limited bench power, still no propeller.
-
-## Git Milestones
-
-Known milestones:
-
-```text
-v0.1.6-rtt-adc-live-value
-v0.1.7-pb14-temperature-feedback-raw
-v0.1.8-pa0-vbus-raw-monitor
-v0.1.9-opamp-output-raw-monitor
-v0.2.0-drive-pins-safe-low-readback
-v0.2.1-tim1-internal-counter-moe-off
-v0.2.2-tim1-af-pins-moe-off
-v0.2.3-fix1-tim1-ccer-enabled-moe-off
-v0.2.4-tim1-moe-on-ccer-off
-```
-
-<!--
-Footer
-File: README.md
-Version: v0.2.4-tim1-moe-on-ccer-off
-Created: 2026-06-07
-Generated timestamp: 2026-06-07
--->
