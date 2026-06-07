@@ -1,7 +1,7 @@
 <!--
 File: README.md
 Path: ~/stm32-rust-test/b-g431b-esc1-rust/README.md
-Version: v0.1.9-opamp-output-raw-monitor
+Version: v0.2.1-tim1-internal-counter-moe-off
 Purpose: Project notes and bring-up roadmap for Rust firmware on the B-G431B-ESC1 / STM32G431CB ESC board
 Created: 2026-06-07
 Generated timestamp: 2026-06-07
@@ -22,12 +22,11 @@ USB / ST-LINK section
   - Provides USB connection to the PC
   - Acts as debugger / programmer
   - Supports probe-rs, cargo-embed, SWD, and RTT output
-  - Has its own LEDs and activity indication
   - Not the MCU being programmed by this project
 
 ESC / target section
   - Contains the STM32G431CB target MCU
-  - Contains motor-control hardware, gate drivers, MOSFETs, current feedback, VBUS feedback, and board I/O
+  - Contains motor-control hardware, L6387 half-bridge drivers, MOSFETs, sensors, and board I/O
   - This is the MCU running the Rust firmware
 ```
 
@@ -46,7 +45,7 @@ Rust target: thumbv7em-none-eabihf
 Current firmware version:
 
 ```text
-v0.1.9-opamp-output-raw-monitor
+v0.2.1-tim1-internal-counter-moe-off
 ```
 
 Confirmed working:
@@ -55,17 +54,19 @@ Confirmed working:
 - ST-LINK detection
 - probe-rs flashing
 - cargo-embed RTT terminal output
-- probe-rs attach without reflashing
 - Rust no_std firmware boot
 - linker/memory.x setup
 - PC6 STATUS LED output
 - PC10 user button input
 - PB12 potentiometer ADC input
 - PB14 temperature feedback ADC input
-- PA0 VBUS feedback ADC input
-- PA2 OP1 output raw ADC monitor
-- PA6 OP2 output raw ADC monitor
-- PB1 OP3 output raw ADC monitor
+- PA0 VBUS raw ADC input
+- OP1/OP2/OP3 raw current-feedback output monitor
+- six L6387 drive input pins forced LOW as GPIO outputs
+- TIM1 internal counter configured and running
+- TIM1 outputs disabled
+- TIM1 BDTR.MOE held OFF
+- drive pins remain GPIO LOW while TIM1 runs internally
 ```
 
 ## Confirmed Board Pin Notes
@@ -83,35 +84,123 @@ PA6   = OP2_OUT raw monitor / ADC2_IN3
 PB1   = OP3_OUT raw monitor / ADC1_IN12
 ```
 
-Current feedback schematic interpretation:
-
-```text
-Current feedback phase 1:
-  PA1 = Curr_fdbk1_OPamp+
-  PA2 = OP1_OUT
-  PA3 = Curr_fdbk1_OPamp-
-
-Current feedback phase 2:
-  PA7 = Curr_fdbk2_OPamp+
-  PA6 = OP2_OUT
-  PA5 = Curr_fdbk2_OPamp-
-
-Current feedback phase 3:
-  PB0 = Curr_fdbk3_OPamp+
-  PB1 = OP3_OUT
-  PB2 = Curr_fdbk3_OPamp-
-```
-
-## Observed Signal Behavior
-
-### Potentiometer
+Observed potentiometer behavior:
 
 ```text
 pot far right  = low ADC value, near 0
 pot far left   = high ADC value, up to 4095
 ```
 
-Current firmware behavior:
+Observed temperature feedback behavior:
+
+```text
+PB14 temp_raw increases when the ESC board is warmed by hand
+PB14 temp_raw falls back toward ambient when released
+```
+
+Observed VBUS behavior:
+
+```text
+USB / ESC input observed around 4.73 V  -> vbus_raw around 577
+Bench supply around 10 V                -> vbus_raw around 1214
+```
+
+Bench-derived rough scale:
+
+```text
+vbus_volts ≈ vbus_raw / 121.5
+```
+
+This VBUS scale is only a bench-derived estimate until the divider values are confirmed from the schematic.
+
+Observed raw OPAMP/current-feedback output baselines with no motor current:
+
+```text
+op1_raw ≈ 1590–1615
+op2_raw ≈ 1970–1999
+op3_raw ≈ 1500–1525
+```
+
+These are treated as zero-current raw offsets at this stage.
+
+## Gate Driver / Phase Drive Pins
+
+From schematic inspection:
+
+```text
+U phase:
+  PA8  = UH = TIM1_CH1  -> L6387 HIN
+  PC13 = UL = TIM1_CH1N -> L6387 LIN
+  phase output = OUT1
+
+V phase:
+  PA9  = VH = TIM1_CH2  -> L6387 HIN
+  PA12 = VL = TIM1_CH2N -> L6387 LIN
+  phase output = OUT2
+
+W phase:
+  PA10 = WH = TIM1_CH3  -> L6387 HIN
+  PB15 = WL = TIM1_CH3N -> L6387 LIN
+  phase output = OUT3
+```
+
+Current firmware state:
+
+```text
+PA8  UH = GPIO output LOW
+PC13 UL = GPIO output LOW
+PA9  VH = GPIO output LOW
+PA12 VL = GPIO output LOW
+PA10 WH = GPIO output LOW
+PB15 WL = GPIO output LOW
+```
+
+`v0.2.0` confirmed GPIO readback:
+
+```text
+drive_safe=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+```
+
+`v0.2.1` keeps those six pins as GPIO LOW while TIM1 runs internally only.
+
+## TIM1 Internal Counter Test
+
+`v0.2.1-tim1-internal-counter-moe-off` configures TIM1 internally while keeping the L6387 inputs disconnected from TIM1 alternate function.
+
+Confirmed TIM1 state:
+
+```text
+TIM1 clock enabled
+TIM1 counter running
+TIM1 ARR = 3999
+TIM1 CCR1 = 0
+TIM1 CCR2 = 0
+TIM1 CCR3 = 0
+TIM1 CCER = 0
+TIM1 BDTR.MOE = 0
+```
+
+Expected RTT fields:
+
+```text
+drive_safe=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+tim1_counting=1
+tim1_arr=3999
+tim1_ccr1=0 tim1_ccr2=0 tim1_ccr3=0
+tim1_ccer=0
+tim1_moe=0
+```
+
+Interpretation:
+
+```text
+TIM1 is alive internally.
+TIM1 is not driving the L6387 inputs.
+All phase-drive input pins remain commanded LOW by GPIO.
+No MOSFET switching is commanded.
+```
+
+## Current Firmware Behavior
 
 ```text
 button released:
@@ -119,87 +208,22 @@ button released:
 
 button held:
   fixed fast blink override
+
+RTT terminal:
+  prints live board telemetry, TIM1 readback, drive-pin readback, and timeout state
 ```
 
-### Temperature Feedback
-
-PB14 temperature feedback is confirmed live:
+Current RTT output includes fields similar to:
 
 ```text
-- temp_raw rises when the ESC board is warmed by hand
-- temp_raw falls back toward ambient when released
-- values are raw ADC only, not Celsius
+button=0 drive_safe=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0 \
+tim1_counting=1 tim1_cnt_a=<raw> tim1_cnt_b=<raw> tim1_arr=3999 \
+tim1_ccr1=0 tim1_ccr2=0 tim1_ccr3=0 tim1_ccer=0 tim1_moe=0 \
+pot_raw=<raw> pot_pct=<pct> temp_raw=<raw> temp_delta=<delta> \
+vbus_raw=<raw> vbus_delta=<delta> \
+op1_raw=<raw> op1_delta=<delta> op2_raw=<raw> op2_delta=<delta> \
+op3_raw=<raw> op3_delta=<delta> delay_cycles=<value> timeout=0 mode=pot_control
 ```
-
-### VBUS Feedback
-
-PA0 VBUS feedback is confirmed live and roughly proportional to ESC input voltage.
-
-Observed bench test:
-
-```text
-USB / ESC input seen:  about 4.73 V  -> vbus_raw about 577
-Bench supply:          about 10.0 V  -> vbus_raw about 1214
-```
-
-Approximate bench-derived scale:
-
-```text
-vbus_volts ≈ vbus_raw / 121.5
-```
-
-This is only a rough working estimate until the actual VBUS divider values are confirmed from the schematic.
-
-### Current Feedback / OPAMP Output Raw Monitor
-
-With no motor current and no PWM, the raw OPAMP output channels read stable zero-current offsets.
-
-Observed zero-current raw values:
-
-```text
-op1_raw ≈ 1598–1615
-op2_raw ≈ 1997–1999
-op3_raw ≈ 1518–1524
-timeout = 0
-```
-
-Interpretation:
-
-```text
-- ADC reads are valid
-- OPAMP output monitor path is alive
-- these are zero-current offset/bias values
-- these are not load-current measurements yet
-```
-
-Do not connect resistors between motor phase outputs for this firmware. There is no PWM, no gate-driver enable, and no controlled current path yet.
-
-## RTT Output
-
-Current firmware prints live board telemetry over RTT/SWD.
-
-Typical output fields:
-
-```text
-button=<0/1>
-pot_raw=<raw ADC>
-pot_pct=<0..100>
-temp_raw=<raw ADC>
-temp_delta=<raw-startup>
-vbus_raw=<raw ADC>
-vbus_delta=<raw-startup>
-op1_raw=<raw ADC>
-op1_delta=<raw-startup>
-op2_raw=<raw ADC>
-op2_delta=<raw-startup>
-op3_raw=<raw ADC>
-op3_delta=<raw-startup>
-delay_cycles=<value>
-timeout=<0/1>
-mode=<pot_control/button_fast>
-```
-
-RTT output is carried through the ST-LINK debug connection, not UART. The large LED near the USB connector may show activity while probe-rs or cargo-embed is attached and reading RTT data.
 
 ## Useful Commands
 
@@ -263,39 +287,41 @@ b-g431b-esc1-rust/
 
 ## Safety Rules
 
-Early bring-up must avoid motor-control hardware until the board is better understood.
+Early bring-up must avoid uncontrolled motor-control hardware behavior.
 
 Do not connect:
 
 ```text
 - motor
 - propeller
-- resistor between phase outputs
+- phase-to-phase resistor load
 ```
 
-Do not intentionally load phase outputs until PWM, gate-driver enable, fault inputs, current sensing, and protection behavior are understood.
+until PWM, dead-time, gate-driver behavior, current sensing, and protection behavior are deliberately tested.
 
-A bench supply can be used for VBUS feedback testing only when:
-
-```text
-- polarity is confirmed
-- current limit is low
-- no motor is attached
-- firmware does not enable PWM or gate drivers
-```
-
-Current safe-tested features only touch:
+Current safe-tested features include:
 
 ```text
-PC6   STATUS LED
-PC10  button
-PB12  potentiometer ADC
-PB14  temperature feedback ADC
-PA0   VBUS feedback ADC
-PA2   OP1_OUT ADC monitor
-PA6   OP2_OUT ADC monitor
-PB1   OP3_OUT ADC monitor
+PC6  STATUS LED
+PC10 button
+PB12 potentiometer ADC
+PB14 temperature feedback ADC
+PA0  VBUS ADC
+PA2/PA6/PB1 raw OPAMP output ADC monitor
+TIM1 internal counter only, outputs disabled
+Six L6387 input pins held GPIO LOW
 RTT over ST-LINK/SWD
+```
+
+Bench supply testing performed so far:
+
+```text
+USB connected for ST-LINK / RTT
+Bench supply connected to ESC input only for VBUS raw monitor
+No motor
+No propeller
+No PWM on drive pins
+Current limit around 100 mA during low-voltage VBUS test
 ```
 
 ## Bring-up Roadmap
@@ -337,125 +363,97 @@ Basic ADC input:
 
 ### Stage 4 — Completed
 
-Temperature feedback monitor:
+Temperature feedback raw monitor:
 
 ```text
 - configure PB14 as analog input
 - read ADC1_IN5
-- confirm raw value changes with hand warming
-- leave value as raw ADC, not Celsius
+- print temp_raw and temp_delta over RTT
+- confirm temp_raw moves when board is warmed by hand
 ```
 
 ### Stage 5 — Completed
 
-VBUS feedback monitor:
+VBUS raw monitor:
 
 ```text
 - configure PA0 as analog input
 - read ADC1_IN1
-- confirm raw value changes with bench supply input voltage
-- rough observed scale: vbus_volts ≈ vbus_raw / 121.5
+- print vbus_raw and vbus_delta over RTT
+- confirm vbus_raw rises with external bench supply voltage
 ```
 
 ### Stage 6 — Completed
 
-Current-feedback raw OPAMP output monitor:
+Raw current-feedback / OPAMP output monitor:
 
 ```text
-- configure PA2 OP1_OUT raw monitor
-- configure PA6 OP2_OUT raw monitor using ADC2
-- configure PB1 OP3_OUT raw monitor
-- confirm stable zero-current offsets at no load
+- monitor PA2 / OP1_OUT / ADC1_IN3
+- monitor PA6 / OP2_OUT / ADC2_IN3
+- monitor PB1 / OP3_OUT / ADC1_IN12
+- capture approximate zero-current offsets
 ```
 
-### Stage 7 — Next Suggested Step
+### Stage 7 — Completed
 
-Inspect gate-driver, fault, shutdown, and enable pins before any PWM work.
-
-Candidate schematic targets:
+Drive pins safe-low GPIO test:
 
 ```text
-- gate-driver enable / shutdown pins
-- fault pins
-- overcurrent / protection pins
-- brake / disable logic
-- TIM1 phase PWM pins
+- configure UH/UL/VH/VL/WH/WL as GPIO outputs
+- preload output latches LOW
+- force all six drive inputs LOW
+- read back GPIO input state
+- confirm drive_safe=1
 ```
+
+### Stage 8 — Completed
+
+TIM1 internal counter test:
+
+```text
+- enable TIM1 clock
+- configure PSC/ARR/CCR1/CCR2/CCR3
+- configure internal PWM mode registers only
+- keep CCER=0
+- keep BDTR.MOE=0
+- keep six drive pins as GPIO LOW
+- confirm TIM1 counter is running from register readback
+```
+
+### Stage 9 — Next Suggested Step
+
+TIM1 alternate-function setup with outputs still disabled.
 
 Goal:
 
 ```text
-RTT output shows driver/fault/protection state before any motor switching.
+- switch the six drive pins to TIM1 alternate-function mapping
+- keep CCER outputs disabled initially
+- keep BDTR.MOE=0
+- configure safe idle states before enabling any output path
+- confirm no unexpected high state on UH/UL/VH/VL/WH/WL
 ```
 
-### Stage 8 — Timer Bring-up, No Power Stage
-
-Configure motor PWM timer without enabling the gate drivers.
-
-Likely area of work:
+Important note:
 
 ```text
-TIM1 complementary PWM
-UH/VH/WH high-side control signals
-UL/VL/WL low-side control signals
-dead-time setup
-PWM frequency setup
-safe default duty cycle
-all outputs disabled at startup
-gate drivers disabled
+This is more sensitive than v0.2.1 because the pins will stop being plain GPIO outputs.
+Before writing this step, define CCER polarity, output idle states, BDTR idle behavior, and MOE strategy.
 ```
 
-Safety state:
+### Stage 10 — Future Gate Driver / PWM Output Test
+
+Only after alternate-function idle behavior is understood:
 
 ```text
-gate drivers disabled
-no motor attached
-no phase load attached
-```
-
-### Stage 9 — Gate Driver / Fault Bring-up
-
-Only after schematic pin mapping:
-
-```text
-- identify enable/shutdown pins
-- identify fault pins
-- enable driver carefully
-- read fault status
-- verify safe startup and shutdown behavior
-```
-
-Safety state:
-
-```text
-current-limited bench supply
-no propeller
-prefer no motor at first
-```
-
-### Stage 10 — Controlled Resistor-Load Current Test
-
-A future current-feedback test should use a controlled current path, not a resistor across phase outputs.
-
-Possible future concept:
-
-```text
-VBUS+ -> power resistor -> one phase output -> commanded low-side MOSFET -> current shunt -> GND
-```
-
-Required first:
-
-```text
-- gate-driver enable/fault pins understood
-- PWM outputs understood
-- one low-side MOSFET can be commanded safely
-- current-limited bench supply
-- appropriate power resistor
+- enable one known-safe low-side or limited PWM path
+- use current-limited bench supply
 - no motor
 - no propeller
+- consider measurement with scope before attaching any load
 ```
 
-### Stage 11 — First Motor Experiment
+### Stage 11 — Future First Motor Experiment
 
 First actual motor-control goal:
 
@@ -475,37 +473,37 @@ motor twitches or slowly spins under controlled open-loop sequence
 
 ## Current Notes
 
+RTT output is carried through the ST-LINK debug connection, not UART. The large LED near the USB connector may show activity while probe-rs or cargo-embed is attached and reading RTT data.
+
 The ST-LINK section remains intact after flashing this project because the firmware is written to the STM32G431CB target MCU on the ESC section.
 
-The VBUS raw monitor shows the board input/DC bus sense, not a calibrated voltage yet.
-
-The current-feedback raw monitor currently proves zero-current offsets. It does not prove load-current response yet.
+The log rate currently follows the main loop rate. Since the potentiometer controls blink delay, it also affects how quickly RTT log lines scroll.
 
 ## Git Milestones
 
-Current baseline commit target:
-
-```text
-v0.1.9 add raw opamp output monitor
-```
-
-Recommended future tags:
+Confirmed milestones:
 
 ```text
 v0.1.6-rtt-adc-live-value
 v0.1.7-pb14-temperature-feedback-raw
 v0.1.8-pa0-vbus-raw-monitor
 v0.1.9-opamp-output-raw-monitor
-v0.2.0-driver-fault-shutdown-monitor
-v0.3.0-tim1-pwm-disabled-output-test
-v0.4.0-gate-driver-safe-enable-test
-v0.5.0-open-loop-6step-first-spin
+v0.2.0-drive-pins-safe-low-readback
+v0.2.1-tim1-internal-counter-moe-off
+```
+
+Recommended next tags:
+
+```text
+v0.2.2-tim1-af-moe-off
+v0.3.0-first-safe-pwm-output-test
+v0.4.0-open-loop-6step-first-spin
 ```
 
 <!--
 Footer
 File: README.md
-Version: v0.1.9-opamp-output-raw-monitor
+Version: v0.2.1-tim1-internal-counter-moe-off
 Created: 2026-06-07
 Generated timestamp: 2026-06-07
 -->
