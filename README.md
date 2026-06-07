@@ -1,17 +1,4 @@
-# ================================================================
-# File: README.md
-# Path: ~/stm32-rust-test/b-g431b-esc1-rust/README.md
-# Version: v0.4.0-bemf-observe-openloop
-# Purpose: Project notes for STM32G431CB / B-G431B-ESC1 bare-metal
-#          Rust ESC bring-up, current monolithic BEMF observe baseline,
-#          and next planned split before open-loop sine/SPWM control.
-# Target: ST B-G431B-ESC1, STM32G431CB, Cortex-M4F,
-#         thumbv7em-none-eabihf
-# ================================================================
-
-# B-G431B-ESC1 Rust Bring-up
-
-Rust `no_std` bare-metal bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
+#Rust `no_std` bare-metal bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
 
 Current confirmed milestone:
 
@@ -700,13 +687,3 @@ Next control milestone after split:
 ```text
 v0.5.0-openloop-sine-spwm
 ```
-
----
-
-# ================================================================
-# Footer
-# File: README.md
-# Version: v0.4.0-bemf-observe-openloop
-# Created: 2026-06-07
-# Generated timestamp: 2026-06-07
-# ================================================================
