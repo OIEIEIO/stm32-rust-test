@@ -1,0 +1,36 @@
+# ================================================================
+# File: Cargo.toml
+# Path: ~/stm32-rust-test/b-g431b-esc1-rust/Cargo.toml
+# Version: v0.1.5-rtt-adc-pot-debug-fix1
+# Purpose: Minimal Rust no_std firmware crate for B-G431B-ESC1 bring-up with RTT ADC debug
+# Target: STM32G431CB, Cortex-M4F, thumbv7em-none-eabihf
+# ================================================================
+
+[package]
+name = "b-g431b-esc1-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+panic-halt = "0.2"
+rtt-target = "0.6"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+debug = true
+lto = true
+opt-level = "s"
+
+# ================================================================
+# Footer
+# File: Cargo.toml
+# Version: v0.1.5-rtt-adc-pot-debug-fix1
+# Created: 2026-06-07
+# Generated timestamp: 2026-06-07
+# ================================================================

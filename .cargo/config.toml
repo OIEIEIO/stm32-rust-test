@@ -1,0 +1,26 @@
+# ================================================================
+# File: config.toml
+# Path: ~/stm32-rust-test/b-g431b-esc1-rust/.cargo/config.toml
+# Version: v0.1.0-pc6-status-blink
+# Purpose: Cargo target/runner config for B-G431B-ESC1 Rust bring-up
+# Target: STM32G431CB, Cortex-M4F, thumbv7em-none-eabihf
+# ================================================================
+
+[build]
+target = "thumbv7em-none-eabihf"
+
+[target.thumbv7em-none-eabihf]
+runner = "probe-rs run --chip STM32G431CB"
+
+rustflags = [
+    "-C", "link-arg=-Tlink.x",
+    "-C", "link-arg=--nmagic",
+]
+
+# ================================================================
+# Footer
+# File: config.toml
+# Version: v0.1.0-pc6-status-blink
+# Created: 2026-06-07
+# Generated timestamp: 2026-06-07
+# ================================================================

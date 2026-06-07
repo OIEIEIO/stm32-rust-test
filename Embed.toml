@@ -1,0 +1,21 @@
+# ================================================================
+# File: Embed.toml
+# Path: ~/stm32-rust-test/b-g431b-esc1-rust/Embed.toml
+# Version: v0.1.5-rtt-adc-pot-debug
+# Purpose: cargo-embed config for STM32G431CB RTT terminal output
+# Target: B-G431B-ESC1 / STM32G431CB
+# ================================================================
+
+[default.general]
+chip = "STM32G431CB"
+
+[default.rtt]
+enabled = true
+
+# ================================================================
+# Footer
+# File: Embed.toml
+# Version: v0.1.5-rtt-adc-pot-debug
+# Created: 2026-06-07
+# Generated timestamp: 2026-06-07
+# ================================================================
