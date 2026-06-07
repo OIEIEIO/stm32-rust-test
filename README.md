@@ -5,7 +5,7 @@ Rust bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431C
 Current confirmed milestone:
 
 ```text
-v0.2.8-single-low-side-wl-on
+v0.2.11-single-high-side-wh-command
 ```
 
 This project is focused on safe, step-by-step board bring-up before attempting to spin a BLDC motor.
@@ -129,7 +129,7 @@ RTT logging works through probe-rs.
 Observed behavior:
 
 ```text
-Potentiometer controls LED blink rate.
+Potentiometer controls LED blink/log rate.
 Temperature raw value rises when the ESC board is warmed by hand.
 VBUS raw value rises when external ESC power input is raised.
 ```
@@ -400,12 +400,6 @@ Board stayed cold.
 
 ### v0.2.8 WL low-side only
 
-Current confirmed version:
-
-```text
-v0.2.8-single-low-side-wl-on
-```
-
 Confirmed:
 
 ```text
@@ -438,19 +432,186 @@ Board stayed cold to the touch.
 
 ---
 
+## High-side input-command tests
+
+These tests deliberately commanded one high-side gate-driver input high at a time.
+
+Important limitation:
+
+```text
+Confirmed: STM32/TIM1 to gate-driver input command path.
+Not directly confirmed: actual high-side MOSFET gate voltage, bootstrap voltage, or switching waveform.
+```
+
+No motor was connected for any of these tests.
+
+The high-side tests are useful because they verify the command path and pin mapping without intentionally creating a VBUS-to-ground current path.
+
+---
+
+### v0.2.9 UH high-side command only
+
+Confirmed:
+
+```text
+uh_test_ok=1
+tim1_register_ok=1
+af_ok=1
+uh_only_active=1
+tim1_counting=1
+tim1_ccer=1
+tim1_ccer_expected=1
+tim1_moe=1
+forced_modes_ok=1
+
+UH_pin=1
+UL_pin=0
+VH_pin=0
+VL_pin=0
+WH_pin=0
+WL_pin=0
+```
+
+External VBUS test:
+
+```text
+Motor disconnected.
+Bench supply applied.
+No meaningful supply current draw.
+Board stayed cool.
+```
+
+---
+
+### v0.2.10 VH high-side command only
+
+Confirmed:
+
+```text
+vh_test_ok=1
+tim1_register_ok=1
+af_ok=1
+vh_only_active=1
+tim1_counting=1
+tim1_ccer=16
+tim1_ccer_expected=1
+tim1_moe=1
+forced_modes_ok=1
+
+UH_pin=0
+UL_pin=0
+VH_pin=1
+VL_pin=0
+WH_pin=0
+WL_pin=0
+```
+
+External VBUS test:
+
+```text
+Motor disconnected.
+Bench supply applied.
+No meaningful supply current draw.
+Board stayed cool.
+```
+
+---
+
+### v0.2.11 WH high-side command only
+
+Current confirmed version:
+
+```text
+v0.2.11-single-high-side-wh-command
+```
+
+Confirmed:
+
+```text
+wh_test_ok=1
+tim1_register_ok=1
+af_ok=1
+wh_only_active=1
+tim1_counting=1
+tim1_ccer=256
+tim1_ccer_expected=1
+tim1_moe=1
+forced_modes_ok=1
+
+UH_pin=0
+UL_pin=0
+VH_pin=0
+VL_pin=0
+WH_pin=1
+WL_pin=0
+```
+
+External VBUS test:
+
+```text
+Motor disconnected.
+Bench supply applied.
+No meaningful supply current draw was expected.
+No unexpected pin state was observed.
+Board stayed cool.
+```
+
+---
+
 ## Current confirmed milestone
+
+All six individual command paths have now been tested one at a time:
 
 ```text
 UL low-side command path works.
 VL low-side command path works.
 WL low-side command path works.
-External VBUS tested up to 12 V with motor disconnected.
-No bench supply load observed.
-Board stayed cold.
-No unexpected drive pin state observed.
+
+UH high-side input command path works.
+VH high-side input command path works.
+WH high-side input command path works.
 ```
 
-This is a good milestone before moving toward high-side/bootstrap-aware testing or motor-connected testing.
+More precise interpretation:
+
+```text
+Confirmed:
+- TIM1 register setup is working.
+- TIM1 alternate-function routing is working.
+- Each intended gate-driver input can be commanded individually.
+- Non-target drive inputs stay low during each single-output test.
+- External VBUS testing caused no unexpected current draw.
+- Board stayed cool during these no-motor tests.
+
+Not yet directly confirmed:
+- Actual MOSFET gate voltage.
+- Actual MOSFET drain/source conduction.
+- Bootstrap capacitor behavior.
+- Real switching waveform.
+- Motor phase output behavior under load.
+```
+
+---
+
+## Why outputs are tested one at a time
+
+The one-at-a-time method reduces risk and helps catch errors before motor-connected testing.
+
+It helps verify:
+
+```text
+wrong pin mapping
+wrong alternate-function selection
+wrong TIM1 channel selection
+wrong polarity
+unexpected complementary output
+unexpected two-FET activation in one phase
+shoot-through risk
+unexpected current draw under VBUS
+heat or bad board behavior
+```
+
+With only one driver input active and no motor connected, there is no intended current path from VBUS to ground.
 
 ---
 
@@ -458,34 +619,115 @@ This is a good milestone before moving toward high-side/bootstrap-aware testing 
 
 Do not connect a motor for the current firmware versions.
 
-The current low-side tests only validate one low-side command path at a time:
+Current tests only validate one command path at a time:
 
 ```text
-One low-side driver input active.
-All high-side inputs off.
-Other low-side inputs off.
-No PWM.
+One driver input active.
+All other driver inputs inactive.
+No PWM duty.
+No commutation.
 No motor.
-No load path expected.
+No intentional load path.
 ```
 
 ---
 
-## Next likely step
+## Next research topic
 
-Next step should be discussed before coding.
+Before writing the next firmware step, research and review the L6387 high-side bootstrap behavior.
 
-Recommended next technical direction:
+Specific items to research:
 
 ```text
-High-side path preparation / bootstrap-aware testing.
-Still no motor at first.
-Use current-limited bench supply.
-Avoid simultaneous high-side and low-side conduction.
-Review L6387 bootstrap behavior before commanding high-side outputs.
+L6387 bootstrap capacitor charging path.
+Minimum low-side on-time needed to charge bootstrap.
+Bootstrap diode behavior.
+High-side UVLO behavior.
+How long the high-side can stay on from bootstrap charge.
+Recommended bootstrap capacitor sizing.
+Dead-time requirements.
+Safe startup state.
+Safe pulse sequencing.
+How to avoid high-side/low-side shoot-through.
 ```
 
-A first motor spin test comes later.
+Board-specific schematic items to review:
+
+```text
+bootstrap capacitors on each L6387 driver
+bootstrap diodes
+gate resistors
+phase output nodes
+shunt/current monitor path
+VBUS divider
+current feedback op-amp outputs
+```
+
+---
+
+## Next likely firmware step
+
+Recommended next firmware step:
+
+```text
+v0.2.12 bootstrap-aware single-phase pulse prep
+```
+
+Likely test concept, still motor disconnected:
+
+```text
+1. Start all outputs safe/inactive.
+2. Briefly command the matching low-side input to create a bootstrap charge opportunity.
+3. Turn all outputs off.
+4. Briefly command the matching high-side input.
+5. Return all outputs off.
+6. Repeat slowly.
+7. Keep detailed logs of requested state, register state, pin readback, VBUS, temperature, and current-monitor raw ADC values.
+```
+
+Initial target phase:
+
+```text
+U phase:
+UL bootstrap-charge pulse
+all off
+UH command pulse
+all off
+repeat slowly
+```
+
+Safety constraints for this next step:
+
+```text
+No motor.
+Current-limited bench supply.
+Start around 5 V.
+Low current limit.
+Stop immediately if current rises unexpectedly.
+Stop immediately if anything warms up.
+Avoid simultaneous UH and UL.
+Avoid enabling any other phase.
+```
+
+The goal of the next firmware is still not motor spin. The goal is to prepare a controlled bootstrap-aware pulse pattern and watch for safe board behavior.
+
+---
+
+## Future steps after bootstrap-aware testing
+
+Possible later sequence:
+
+```text
+1. Bootstrap-aware U phase pulse test, no motor.
+2. Repeat for V phase, no motor.
+3. Repeat for W phase, no motor.
+4. Review whether a scope or meter is available for gate/phase verification.
+5. Create very low-duty open-loop six-step commutation firmware.
+6. Connect small BLDC motor with no prop.
+7. Use low VBUS and strict current limit.
+8. Attempt first brief motor twitch.
+9. Only later attempt slow controlled spin.
+```
 
 ---
 
@@ -494,7 +736,7 @@ A first motor spin test comes later.
 Use version tags matching the tested firmware milestone, for example:
 
 ```text
-v0.2.8-single-low-side-wl-on
+v0.2.11-single-high-side-wh-command
 ```
 
 ---
@@ -507,6 +749,16 @@ Current status:
 v0.2.6-fix2 UL low-side passed.
 v0.2.7 VL low-side passed.
 v0.2.8 WL low-side passed.
-External VBUS tested up to 12 V with no motor and no load.
-Ready to commit the three-low-side phase-test milestone.
+
+v0.2.9 UH high-side input-command passed.
+v0.2.10 VH high-side input-command passed.
+v0.2.11 WH high-side input-command passed.
+
+Ready to commit the six individual command-path milestone.
+Next: research L6387 bootstrap behavior before writing bootstrap-aware pulse firmware.
 ```
+
+---
+
+Created: 2026-06-07
+Updated milestone: v0.2.11-single-high-side-wh-command

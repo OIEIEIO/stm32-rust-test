@@ -1,8 +1,8 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.2.8-single-low-side-wl-on
-// Purpose: STM32G431CB Rust bring-up: deliberate single low-side output test, WL only
+// Version: v0.2.11-single-high-side-wh-command
+// Purpose: STM32G431CB Rust bring-up: deliberate single high-side input command test, WH only
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 // ================================================================
 
@@ -106,26 +106,24 @@ const TIM1_BDTR_OSSR: u32 = 1 << 11;
 const TIM1_BDTR_MOE: u32 = 1 << 15;
 
 const TIM1_CCMR_FORCED_INACTIVE: u32 = 0b100;
+const TIM1_CCMR_FORCED_ACTIVE: u32 = 0b101;
 
-// WL-only test:
-// - CH3 forced inactive
+// WH-only high-side input command test:
+// - CH3 forced active
 // - CC3E enabled
-// - CC3NE enabled
-// - CC3NP cleared
+// - CC3NE disabled
 // - CH1/CH2 disabled
 //
-// Expected:
+// Expected MCU/gate-driver input pins:
 //   UH=0
 //   UL=0
 //   VH=0
 //   VL=0
-//   WH=0
-//   WL=1
+//   WH=1
+//   WL=0
 //
-// Decimal expected value: 1280.
-const TIM1_CCER_WL_ONLY_ACTIVE: u32 =
-    (1 << 8) |   // CC3E
-    (1 << 10);   // CC3NE
+// Decimal expected value: 256.
+const TIM1_CCER_WH_ONLY_ACTIVE: u32 = 1 << 8; // CC3E only
 
 const TIM1_TEST_PSC: u32 = 0;
 const TIM1_TEST_ARR: u32 = 3999;
@@ -240,7 +238,7 @@ struct DriveAfReadback {
     wl_af: u32,
 
     af_ok: u32,
-    wl_only_active: u32,
+    wh_only_active: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -394,12 +392,12 @@ fn read_drive_af() -> DriveAfReadback {
         0
     };
 
-    let wl_only_active = if uh_pin == 0
+    let wh_only_active = if uh_pin == 0
         && ul_pin == 0
         && vh_pin == 0
         && vl_pin == 0
-        && wh_pin == 0
-        && wl_pin == 1
+        && wh_pin == 1
+        && wl_pin == 0
     {
         1
     } else {
@@ -426,7 +424,7 @@ fn read_drive_af() -> DriveAfReadback {
         wh_af,
         wl_af,
         af_ok,
-        wl_only_active,
+        wh_only_active,
     }
 }
 
@@ -446,32 +444,32 @@ fn delay_fast_button() {
 // TIM1 helpers
 // ------------------------------------------------------------
 
-fn set_tim1_wl_only_modes() {
+fn set_tim1_wh_only_modes() {
     unsafe {
-        // CH3 forced inactive with CC3E + CC3NE enabled and CC3NP cleared.
-        // Expected result is WH=0 and WL=1.
+        // CH3 forced active with CC3E enabled and CC3NE disabled.
+        // Expected input state is WH=1 and WL=0.
         // CH1/CH2 remain forced inactive and disabled.
         let ccmr1 =
             (TIM1_CCMR_FORCED_INACTIVE << 4) |
             (TIM1_CCMR_FORCED_INACTIVE << 12);
 
-        let ccmr2 = TIM1_CCMR_FORCED_INACTIVE << 4;
+        let ccmr2 = TIM1_CCMR_FORCED_ACTIVE << 4;
 
         write_volatile(TIM1_CCMR1, ccmr1);
         write_volatile(TIM1_CCMR2, ccmr2);
     }
 }
 
-fn enforce_tim1_wl_only_active() {
+fn enforce_tim1_wh_only_active() {
     unsafe {
         write_volatile(TIM1_CCR1, 0);
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
-        set_tim1_wl_only_modes();
+        set_tim1_wh_only_modes();
 
-        // WL only: CC3E + CC3NE enabled, normal N polarity.
-        write_volatile(TIM1_CCER, TIM1_CCER_WL_ONLY_ACTIVE);
+        // WH only: CC3E enabled, CC3NE disabled.
+        write_volatile(TIM1_CCER, TIM1_CCER_WH_ONLY_ACTIVE);
 
         let mut bdtr = read_volatile(TIM1_BDTR);
         bdtr |= TIM1_BDTR_OSSI;
@@ -502,7 +500,7 @@ fn read_tim1() -> Tim1Readback {
         let ossi = if (bdtr & TIM1_BDTR_OSSI) != 0 { 1 } else { 0 };
         let ossr = if (bdtr & TIM1_BDTR_OSSR) != 0 { 1 } else { 0 };
 
-        let ccer_expected = if ccer == TIM1_CCER_WL_ONLY_ACTIVE {
+        let ccer_expected = if ccer == TIM1_CCER_WH_ONLY_ACTIVE {
             1
         } else {
             0
@@ -514,7 +512,7 @@ fn read_tim1() -> Tim1Readback {
 
         let forced_modes_ok = if oc1m == TIM1_CCMR_FORCED_INACTIVE
             && oc2m == TIM1_CCMR_FORCED_INACTIVE
-            && oc3m == TIM1_CCMR_FORCED_INACTIVE
+            && oc3m == TIM1_CCMR_FORCED_ACTIVE
         {
             1
         } else {
@@ -562,7 +560,7 @@ fn read_tim1() -> Tim1Readback {
     }
 }
 
-fn setup_tim1_wl_only_active() {
+fn setup_tim1_wh_only_active() {
     unsafe {
         let apb2enr = read_volatile(RCC_APB2ENR);
         write_volatile(RCC_APB2ENR, apb2enr | RCC_APB2ENR_TIM1EN);
@@ -584,12 +582,12 @@ fn setup_tim1_wl_only_active() {
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
-        set_tim1_wl_only_modes();
+        set_tim1_wh_only_modes();
 
         write_volatile(TIM1_EGR, TIM1_EGR_UG);
         write_volatile(TIM1_CR1, TIM1_CR1_ARPE | TIM1_CR1_CEN);
 
-        enforce_tim1_wl_only_active();
+        enforce_tim1_wh_only_active();
     }
 }
 
@@ -838,7 +836,7 @@ fn setup_drive_pins_tim1_af() {
         gpioc_ospeedr &= !(0b11 << (DRIVE_UL_PIN * 2));
         write_volatile(GPIOC_OSPEEDR, gpioc_ospeedr);
 
-        enforce_tim1_wl_only_active();
+        enforce_tim1_wh_only_active();
     }
 }
 
@@ -943,18 +941,18 @@ fn main() -> ! {
     rtt_init_print!();
 
     setup_gpio_base();
-    setup_tim1_wl_only_active();
+    setup_tim1_wh_only_active();
     setup_drive_pins_tim1_af();
 
-    enforce_tim1_wl_only_active();
+    enforce_tim1_wh_only_active();
 
     let (adc1_setup_status, adc2_setup_status) = setup_adc_for_board_monitor();
 
     let drive_startup = read_drive_af();
     let tim1_startup = read_tim1();
 
-    let startup_wl_test_ok = if drive_startup.af_ok == 1
-        && drive_startup.wl_only_active == 1
+    let startup_wh_test_ok = if drive_startup.af_ok == 1
+        && drive_startup.wh_only_active == 1
         && tim1_startup.tim1_register_ok == 1
     {
         1
@@ -971,18 +969,19 @@ fn main() -> ! {
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.2.8-single-low-side-wl-on");
+    rprintln!("Version: v0.2.11-single-high-side-wh-command");
     rprintln!("Drive pins are TIM1 alternate function.");
-    rprintln!("TIM1 deliberate test state: WL low-side active only.");
-    rprintln!("Expected pins: UH=0 UL=0 VH=0 VL=0 WH=0 WL=1.");
-    rprintln!("No motor. No PWM. One low-side command only.");
+    rprintln!("TIM1 deliberate test state: WH high-side input command only.");
+    rprintln!("Expected pins: UH=0 UL=0 VH=0 VL=0 WH=1 WL=0.");
+    rprintln!("No motor. No PWM. One high-side input command only.");
+    rprintln!("This proves the MCU/TIM1 input command path, not the actual high-side MOSFET gate voltage.");
     rprintln!("ADC1 setup status: {}", adc1_setup_status);
     rprintln!("ADC2 setup status: {}", adc2_setup_status);
 
     rprintln!(
-        "drive_startup: af_ok={} wl_only_active={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} UH_mode={} UL_mode={} VH_mode={} VL_mode={} WH_mode={} WL_mode={} UH_af={} UL_af={} VH_af={} VL_af={} WH_af={} WL_af={}",
+        "drive_startup: af_ok={} wh_only_active={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} UH_mode={} UL_mode={} VH_mode={} VL_mode={} WH_mode={} WL_mode={} UH_af={} UL_af={} VH_af={} VL_af={} WH_af={} WL_af={}",
         drive_startup.af_ok,
-        drive_startup.wl_only_active,
+        drive_startup.wh_only_active,
         drive_startup.uh_pin,
         drive_startup.ul_pin,
         drive_startup.vh_pin,
@@ -1004,8 +1003,8 @@ fn main() -> ! {
     );
 
     rprintln!(
-        "tim1_startup: startup_wl_test_ok={} tim1_register_ok={} counting={} cnt_a={} cnt_b={} arr={} ccr1={} ccr2={} ccr3={} ccer={} ccer_expected={} bdtr={} cr2={} ccmr1={} ccmr2={} moe={} ossi={} ossr={} forced_modes_ok={}",
-        startup_wl_test_ok,
+        "tim1_startup: startup_wh_test_ok={} tim1_register_ok={} counting={} cnt_a={} cnt_b={} arr={} ccr1={} ccr2={} ccr3={} ccer={} ccer_expected={} bdtr={} cr2={} ccmr1={} ccmr2={} moe={} ossi={} ossr={} forced_modes_ok={}",
+        startup_wh_test_ok,
         tim1_startup.tim1_register_ok,
         tim1_startup.counting,
         tim1_startup.cnt_a,
@@ -1032,19 +1031,19 @@ fn main() -> ! {
     rprintln!("op2_startup_raw: {}", op2_startup_raw);
     rprintln!("op3_startup_raw: {}", op3_startup_raw);
     rprintln!("Output format:");
-    rprintln!("button=<0/1> wl_test_ok=<0/1> tim1_register_ok=<0/1> af_ok=<0/1> wl_only_active=<0/1> tim1_counting=<0/1> tim1_ccer=<raw> tim1_moe=<0/1> forced_modes_ok=<0/1> pot_raw=<raw> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> timeout=<0/1>");
+    rprintln!("button=<0/1> wh_test_ok=<0/1> tim1_register_ok=<0/1> af_ok=<0/1> wh_only_active=<0/1> tim1_counting=<0/1> tim1_ccer=<raw> tim1_moe=<0/1> forced_modes_ok=<0/1> pot_raw=<raw> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> timeout=<0/1>");
     rprintln!("================================================");
 
     led_low();
 
     loop {
-        enforce_tim1_wl_only_active();
+        enforce_tim1_wh_only_active();
 
         let drive = read_drive_af();
         let tim1 = read_tim1();
 
-        let wl_test_ok = if drive.af_ok == 1
-            && drive.wl_only_active == 1
+        let wh_test_ok = if drive.af_ok == 1
+            && drive.wh_only_active == 1
             && tim1.tim1_register_ok == 1
         {
             1
@@ -1094,11 +1093,11 @@ fn main() -> ! {
 
         if button_pressed() {
             rprintln!(
-                "button=1 wl_test_ok={} tim1_register_ok={} af_ok={} wl_only_active={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_modes_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
-                wl_test_ok,
+                "button=1 wh_test_ok={} tim1_register_ok={} af_ok={} wh_only_active={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_modes_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
+                wh_test_ok,
                 tim1.tim1_register_ok,
                 drive.af_ok,
-                drive.wl_only_active,
+                drive.wh_only_active,
                 tim1.counting,
                 tim1.cnt_a,
                 tim1.cnt_b,
@@ -1141,11 +1140,11 @@ fn main() -> ! {
             blink_fast_button_override();
         } else {
             rprintln!(
-                "button=0 wl_test_ok={} tim1_register_ok={} af_ok={} wl_only_active={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_modes_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
-                wl_test_ok,
+                "button=0 wh_test_ok={} tim1_register_ok={} af_ok={} wh_only_active={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_modes_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
+                wh_test_ok,
                 tim1.tim1_register_ok,
                 drive.af_ok,
-                drive.wl_only_active,
+                drive.wh_only_active,
                 tim1.counting,
                 tim1.cnt_a,
                 tim1.cnt_b,
@@ -1193,7 +1192,7 @@ fn main() -> ! {
 // ================================================================
 // Footer
 // File: main.rs
-// Version: v0.2.8-single-low-side-wl-on
+// Version: v0.2.11-single-high-side-wh-command
 // Created: 2026-06-07
 // Generated timestamp: 2026-06-07
 // ================================================================
