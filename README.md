@@ -1,7 +1,7 @@
 <!--
 File: README.md
 Path: ~/stm32-rust-test/b-g431b-esc1-rust/README.md
-Version: v0.2.1-tim1-internal-counter-moe-off
+Version: v0.2.3-fix1-tim1-ccer-enabled-moe-off
 Purpose: Project notes and bring-up roadmap for Rust firmware on the B-G431B-ESC1 / STM32G431CB ESC board
 Created: 2026-06-07
 Generated timestamp: 2026-06-07
@@ -11,7 +11,7 @@ Generated timestamp: 2026-06-07
 
 Rust firmware bring-up project for the **ST B-G431B-ESC1 Discovery ESC board**.
 
-The goal is to learn the board step by step, starting with safe GPIO and ADC tests, then progressing toward PWM, gate-driver bring-up, and eventually spinning a small BLDC motor.
+The goal is to learn the board step by step, starting with safe GPIO and ADC tests, then progressing toward TIM1 setup, gate-driver bring-up, and eventually spinning a small BLDC motor.
 
 ## Board Understanding
 
@@ -45,7 +45,7 @@ Rust target: thumbv7em-none-eabihf
 Current firmware version:
 
 ```text
-v0.2.1-tim1-internal-counter-moe-off
+v0.2.3-fix1-tim1-ccer-enabled-moe-off
 ```
 
 Confirmed working:
@@ -62,11 +62,41 @@ Confirmed working:
 - PB14 temperature feedback ADC input
 - PA0 VBUS raw ADC input
 - OP1/OP2/OP3 raw current-feedback output monitor
-- six L6387 drive input pins forced LOW as GPIO outputs
+- six L6387 drive pins moved to TIM1 alternate-function mode
 - TIM1 internal counter configured and running
-- TIM1 outputs disabled
-- TIM1 BDTR.MOE held OFF
-- drive pins remain GPIO LOW while TIM1 runs internally
+- TIM1 ARR = 3999
+- TIM1 CCR1/CCR2/CCR3 = 0
+- TIM1 CCER = 1365, enabling CH1/1N/2/2N/3/3N internally
+- TIM1 BDTR.MOE = 0, so main output enable remains OFF
+- TIM1 BDTR.OSSI = 1
+- TIM1 CR2 output idle-state bits remain 0
+- no intentional gate switching yet
+```
+
+Confirmed key RTT fields from `v0.2.3-fix1`:
+
+```text
+safety_ok=1
+af_ok=1
+tim1_counting=1
+tim1_ccer=1365
+tim1_ccer_expected=1
+tim1_moe=0
+tim1_ossi=1
+tim1_ccr1=0
+tim1_ccr2=0
+tim1_ccr3=0
+UH_pin=0 UL_pin=0 VH_pin=0 VL_pin=0 WH_pin=0 WL_pin=0
+```
+
+Interpretation:
+
+```text
+TIM1 owns the six drive pins through alternate function.
+TIM1 channel output-enable bits are configured in CCER.
+TIM1 master output enable remains OFF.
+Duty registers remain zero.
+No motor output is intentionally commanded yet.
 ```
 
 ## Confirmed Board Pin Notes
@@ -117,7 +147,7 @@ Observed raw OPAMP/current-feedback output baselines with no motor current:
 
 ```text
 op1_raw ≈ 1590–1615
-op2_raw ≈ 1970–1999
+op2_raw ≈ 1970–2005
 op3_raw ≈ 1500–1525
 ```
 
@@ -144,60 +174,96 @@ W phase:
   phase output = OUT3
 ```
 
-Current firmware state:
+Current firmware pin function state:
 
 ```text
-PA8  UH = GPIO output LOW
-PC13 UL = GPIO output LOW
-PA9  VH = GPIO output LOW
-PA12 VL = GPIO output LOW
-PA10 WH = GPIO output LOW
-PB15 WL = GPIO output LOW
+PA8  UH = TIM1_CH1  alternate function AF6
+PC13 UL = TIM1_CH1N alternate function AF4
+PA9  VH = TIM1_CH2  alternate function AF6
+PA12 VL = TIM1_CH2N alternate function AF6
+PA10 WH = TIM1_CH3  alternate function AF6
+PB15 WL = TIM1_CH3N alternate function AF4
 ```
 
-`v0.2.0` confirmed GPIO readback:
+`v0.2.2` confirmed alternate-function setup:
 
 ```text
-drive_safe=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
-```
-
-`v0.2.1` keeps those six pins as GPIO LOW while TIM1 runs internally only.
-
-## TIM1 Internal Counter Test
-
-`v0.2.1-tim1-internal-counter-moe-off` configures TIM1 internally while keeping the L6387 inputs disconnected from TIM1 alternate function.
-
-Confirmed TIM1 state:
-
-```text
-TIM1 clock enabled
-TIM1 counter running
-TIM1 ARR = 3999
-TIM1 CCR1 = 0
-TIM1 CCR2 = 0
-TIM1 CCR3 = 0
-TIM1 CCER = 0
-TIM1 BDTR.MOE = 0
-```
-
-Expected RTT fields:
-
-```text
-drive_safe=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
-tim1_counting=1
-tim1_arr=3999
-tim1_ccr1=0 tim1_ccr2=0 tim1_ccr3=0
+af_ok=1
+UH_af=6
+VH_af=6
+WH_af=6
+VL_af=6
+WL_af=4
+UL_af=4
 tim1_ccer=0
 tim1_moe=0
 ```
 
-Interpretation:
+`v0.2.3-fix1` confirmed CCER enabled while MOE remains off:
 
 ```text
-TIM1 is alive internally.
-TIM1 is not driving the L6387 inputs.
-All phase-drive input pins remain commanded LOW by GPIO.
-No MOSFET switching is commanded.
+af_ok=1
+tim1_counting=1
+tim1_ccer=1365
+tim1_ccer_expected=1
+tim1_moe=0
+tim1_ossi=1
+tim1_ccr1=0
+tim1_ccr2=0
+tim1_ccr3=0
+safety_ok=1
+```
+
+## TIM1 Safety Progression
+
+### `v0.2.0-drive-pins-safe-low-readback`
+
+```text
+- configured UH/UL/VH/VL/WH/WL as GPIO outputs
+- forced all six LOW
+- confirmed drive_safe=1 from GPIO readback
+```
+
+### `v0.2.1-tim1-internal-counter-moe-off`
+
+```text
+- enabled TIM1 clock
+- configured TIM1 PSC/ARR/CCR1/CCR2/CCR3
+- configured internal PWM mode registers
+- kept CCER=0
+- kept BDTR.MOE=0
+- kept drive pins as GPIO LOW
+- confirmed TIM1 counter running
+```
+
+### `v0.2.2-tim1-af-pins-moe-off`
+
+```text
+- moved six drive pins to TIM1 alternate-function mode
+- confirmed AF register mapping
+- kept CCER=0
+- kept BDTR.MOE=0
+- kept CCR1/2/3=0
+```
+
+### `v0.2.3-fix1-tim1-ccer-enabled-moe-off`
+
+```text
+- kept drive pins in TIM1 alternate-function mode
+- enabled TIM1 CCER bits for CH1/1N/2/2N/3/3N
+- kept BDTR.MOE=0
+- kept CCR1/2/3=0
+- set OSSI=1
+- kept CR2 idle-state bits at 0
+- confirmed safety_ok=1
+```
+
+Important note:
+
+```text
+Even though CCER is now enabled, BDTR.MOE remains OFF.
+This is still a no-intentional-gate-switching firmware stage.
+Do not connect the motor yet for this milestone.
 ```
 
 ## Current Firmware Behavior
@@ -210,15 +276,17 @@ button held:
   fixed fast blink override
 
 RTT terminal:
-  prints live board telemetry, TIM1 readback, drive-pin readback, and timeout state
+  prints live board telemetry, TIM1 readback, AF mapping, safety state, and timeout state
 ```
 
 Current RTT output includes fields similar to:
 
 ```text
-button=0 drive_safe=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0 \
-tim1_counting=1 tim1_cnt_a=<raw> tim1_cnt_b=<raw> tim1_arr=3999 \
-tim1_ccr1=0 tim1_ccr2=0 tim1_ccr3=0 tim1_ccer=0 tim1_moe=0 \
+button=0 safety_ok=1 af_ok=1 tim1_counting=1 \
+tim1_ccer=1365 tim1_ccer_expected=1 tim1_moe=0 tim1_ossi=1 \
+tim1_ccr1=0 tim1_ccr2=0 tim1_ccr3=0 \
+UH_pin=0 UL_pin=0 VH_pin=0 VL_pin=0 WH_pin=0 WL_pin=0 \
+UH_af=6 UL_af=4 VH_af=6 VL_af=6 WH_af=6 WL_af=4 \
 pot_raw=<raw> pot_pct=<pct> temp_raw=<raw> temp_delta=<delta> \
 vbus_raw=<raw> vbus_delta=<delta> \
 op1_raw=<raw> op1_delta=<delta> op2_raw=<raw> op2_delta=<delta> \
@@ -308,8 +376,10 @@ PB12 potentiometer ADC
 PB14 temperature feedback ADC
 PA0  VBUS ADC
 PA2/PA6/PB1 raw OPAMP output ADC monitor
-TIM1 internal counter only, outputs disabled
-Six L6387 input pins held GPIO LOW
+TIM1 counter
+TIM1 alternate-function drive-pin mapping
+TIM1 CCER output-enable register path
+TIM1 BDTR.MOE held OFF
 RTT over ST-LINK/SWD
 ```
 
@@ -320,7 +390,7 @@ USB connected for ST-LINK / RTT
 Bench supply connected to ESC input only for VBUS raw monitor
 No motor
 No propeller
-No PWM on drive pins
+No PWM intentionally output to drive a motor
 Current limit around 100 mA during low-voltage VBUS test
 ```
 
@@ -420,40 +490,63 @@ TIM1 internal counter test:
 - confirm TIM1 counter is running from register readback
 ```
 
-### Stage 9 — Next Suggested Step
+### Stage 9 — Completed
 
-TIM1 alternate-function setup with outputs still disabled.
+TIM1 alternate-function setup with outputs disabled:
+
+```text
+- switch the six drive pins to TIM1 alternate-function mapping
+- confirm AF register values
+- keep CCER=0
+- keep BDTR.MOE=0
+- keep CCR1/2/3=0
+```
+
+### Stage 10 — Completed
+
+TIM1 CCER enabled with MOE still off:
+
+```text
+- keep the six drive pins in TIM1 alternate-function mode
+- enable CH1/1N/2/2N/3/3N bits in CCER
+- keep BDTR.MOE=0
+- keep CCR1/2/3=0
+- set OSSI=1
+- confirm safety_ok=1
+```
+
+### Stage 11 — Next Suggested Step
+
+Forced inactive / MOE-on safety test.
 
 Goal:
 
 ```text
-- switch the six drive pins to TIM1 alternate-function mapping
-- keep CCER outputs disabled initially
-- keep BDTR.MOE=0
-- configure safe idle states before enabling any output path
-- confirm no unexpected high state on UH/UL/VH/VL/WH/WL
-```
-
-Important note:
-
-```text
-This is more sensitive than v0.2.1 because the pins will stop being plain GPIO outputs.
-Before writing this step, define CCER polarity, output idle states, BDTR idle behavior, and MOE strategy.
-```
-
-### Stage 10 — Future Gate Driver / PWM Output Test
-
-Only after alternate-function idle behavior is understood:
-
-```text
-- enable one known-safe low-side or limited PWM path
-- use current-limited bench supply
+- configure TIM1 channels into forced inactive / forced low mode
+- keep duty effectively off
+- enable BDTR.MOE only after forced inactive mode is confirmed
 - no motor
 - no propeller
-- consider measurement with scope before attaching any load
+- use current-limited bench supply if powering VBUS
+- verify no current jump and telemetry remains stable
 ```
 
-### Stage 11 — Future First Motor Experiment
+This is the first step where `MOE=1` may be tested, so it must be treated as more sensitive than the previous register-only stages.
+
+### Stage 12 — Future First Controlled Output Test
+
+Only after forced-inactive `MOE=1` behavior is understood:
+
+```text
+- consider a single controlled low-side output path
+- very low duty or forced-output test
+- current-limited bench supply
+- no motor initially if possible
+- no propeller
+- prefer oscilloscope/meter confirmation when available
+```
+
+### Stage 13 — Future First Motor Experiment
 
 First actual motor-control goal:
 
@@ -490,20 +583,22 @@ v0.1.8-pa0-vbus-raw-monitor
 v0.1.9-opamp-output-raw-monitor
 v0.2.0-drive-pins-safe-low-readback
 v0.2.1-tim1-internal-counter-moe-off
+v0.2.2-tim1-af-pins-moe-off
+v0.2.3-fix1-tim1-ccer-enabled-moe-off
 ```
 
 Recommended next tags:
 
 ```text
-v0.2.2-tim1-af-moe-off
-v0.3.0-first-safe-pwm-output-test
+v0.2.4-tim1-forced-inactive-moe-on
+v0.3.0-first-safe-output-test
 v0.4.0-open-loop-6step-first-spin
 ```
 
 <!--
 Footer
 File: README.md
-Version: v0.2.1-tim1-internal-counter-moe-off
+Version: v0.2.3-fix1-tim1-ccer-enabled-moe-off
 Created: 2026-06-07
 Generated timestamp: 2026-06-07
 -->
