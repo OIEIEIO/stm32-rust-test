@@ -52,6 +52,7 @@ Confirmed working:
 - PC10 user button input
 - PB12 potentiometer ADC input
 - live ADC value monitor over RTT/SWD
+
 Confirmed Board Pin Notes
 
 From schematic inspection and testing:
@@ -60,6 +61,8 @@ PC6   = STATUS LED output
 PC10  = user button input, active-low
 PB12  = potentiometer input
 PB12  = ADC1_IN11
+PB14 = temperature feedback / ADC1_IN5
+Confirmed raw value increases when board is warmed by hand and falls back toward ambient.
 
 Observed potentiometer behavior:
 
