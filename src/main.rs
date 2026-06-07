@@ -1,8 +1,8 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.2.11-single-high-side-wh-command
-// Purpose: STM32G431CB Rust bring-up: deliberate single high-side input command test, WH only
+// Version: v0.2.14-button-gated-u-twitch-prep
+// Purpose: STM32G431CB Rust bring-up: button-gated U->V motor twitch prep, no motor first
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 // ================================================================
 
@@ -108,25 +108,41 @@ const TIM1_BDTR_MOE: u32 = 1 << 15;
 const TIM1_CCMR_FORCED_INACTIVE: u32 = 0b100;
 const TIM1_CCMR_FORCED_ACTIVE: u32 = 0b101;
 
-// WH-only high-side input command test:
-// - CH3 forced active
-// - CC3E enabled
-// - CC3NE disabled
-// - CH1/CH2 disabled
-//
-// Expected MCU/gate-driver input pins:
-//   UH=0
-//   UL=0
-//   VH=0
-//   VL=0
-//   WH=1
-//   WL=0
-//
-// Decimal expected value: 256.
-const TIM1_CCER_WH_ONLY_ACTIVE: u32 = 1 << 8; // CC3E only
+// All-off forced-low state from v0.2.5-fix1.
+// Expected: UH=0 UL=0 VH=0 VL=0 WH=0 WL=0.
+// Decimal: 3549.
+const TIM1_CCER_ALL_OFF_FORCED_LOW: u32 =
+    (1 << 0) | (1 << 2) | (1 << 3) |
+    (1 << 4) | (1 << 6) | (1 << 7) |
+    (1 << 8) | (1 << 10) | (1 << 11);
+
+// U bootstrap charge.
+// Expected: UH=0 UL=1 VH=0 VL=0 WH=0 WL=0.
+// Decimal: 5.
+const TIM1_CCER_U_BOOTSTRAP_UL: u32 =
+    (1 << 0) |
+    (1 << 2);
+
+// First twitch vector.
+// Expected: UH=1 UL=0 VH=0 VL=1 WH=0 WL=0.
+// Decimal: 81.
+const TIM1_CCER_TWITCH_UH_VL: u32 =
+    (1 << 0) |
+    (1 << 4) |
+    (1 << 6);
 
 const TIM1_TEST_PSC: u32 = 0;
 const TIM1_TEST_ARR: u32 = 3999;
+
+// Timings are intentionally short and conservative.
+// At ~170 MHz CPU clock, these are only approximate.
+const IDLE_LOG_DELAY: u32 = 6_000_000;
+const STATE_SETTLE_DELAY: u32 = 250_000;
+const BOOTSTRAP_HOLD_DELAY: u32 = 500_000;
+const DEADTIME_DELAY: u32 = 250_000;
+const TWITCH_HOLD_DELAY: u32 = 500_000;
+const AFTER_TWITCH_DELAY: u32 = 2_000_000;
+const WAIT_RELEASE_DELAY: u32 = 3_000_000;
 
 // ------------------------------------------------------------
 // ADC register helpers
@@ -211,11 +227,82 @@ const POT_ADC_CHANNEL: u32 = 11;
 const ADC_TIMEOUT_VALUE: u16 = 0xFFFF;
 
 // ------------------------------------------------------------
+// State definitions
+// ------------------------------------------------------------
+
+#[derive(Copy, Clone)]
+enum TwitchState {
+    IdleAllOff,
+    UBootstrapChargeUl,
+    DeadtimeAfterUl,
+    TwitchDriveUhVl,
+    AllOffAfterTwitch,
+    WaitButtonRelease,
+}
+
+impl TwitchState {
+    fn name(self) -> &'static str {
+        match self {
+            TwitchState::IdleAllOff => "idle_all_off",
+            TwitchState::UBootstrapChargeUl => "u_bootstrap_charge_ul",
+            TwitchState::DeadtimeAfterUl => "deadtime_after_ul",
+            TwitchState::TwitchDriveUhVl => "twitch_drive_uh_vl",
+            TwitchState::AllOffAfterTwitch => "all_off_after_twitch",
+            TwitchState::WaitButtonRelease => "wait_button_release_all_off",
+        }
+    }
+
+    fn expected_ccer(self) -> u32 {
+        match self {
+            TwitchState::IdleAllOff => TIM1_CCER_ALL_OFF_FORCED_LOW,
+            TwitchState::UBootstrapChargeUl => TIM1_CCER_U_BOOTSTRAP_UL,
+            TwitchState::DeadtimeAfterUl => TIM1_CCER_ALL_OFF_FORCED_LOW,
+            TwitchState::TwitchDriveUhVl => TIM1_CCER_TWITCH_UH_VL,
+            TwitchState::AllOffAfterTwitch => TIM1_CCER_ALL_OFF_FORCED_LOW,
+            TwitchState::WaitButtonRelease => TIM1_CCER_ALL_OFF_FORCED_LOW,
+        }
+    }
+
+    fn expected_pins(self) -> (u32, u32, u32, u32, u32, u32) {
+        match self {
+            TwitchState::IdleAllOff => (0, 0, 0, 0, 0, 0),
+            TwitchState::UBootstrapChargeUl => (0, 1, 0, 0, 0, 0),
+            TwitchState::DeadtimeAfterUl => (0, 0, 0, 0, 0, 0),
+            TwitchState::TwitchDriveUhVl => (1, 0, 0, 1, 0, 0),
+            TwitchState::AllOffAfterTwitch => (0, 0, 0, 0, 0, 0),
+            TwitchState::WaitButtonRelease => (0, 0, 0, 0, 0, 0),
+        }
+    }
+
+    fn ch1_mode(self) -> u32 {
+        match self {
+            TwitchState::TwitchDriveUhVl => TIM1_CCMR_FORCED_ACTIVE,
+            _ => TIM1_CCMR_FORCED_INACTIVE,
+        }
+    }
+
+    fn ch2_mode(self) -> u32 {
+        TIM1_CCMR_FORCED_INACTIVE
+    }
+
+    fn ch3_mode(self) -> u32 {
+        TIM1_CCMR_FORCED_INACTIVE
+    }
+
+    fn active_led(self) -> bool {
+        match self {
+            TwitchState::UBootstrapChargeUl | TwitchState::TwitchDriveUhVl => true,
+            _ => false,
+        }
+    }
+}
+
+// ------------------------------------------------------------
 // Readback structures
 // ------------------------------------------------------------
 
 #[derive(Copy, Clone)]
-struct DriveAfReadback {
+struct DriveReadback {
     uh_pin: u32,
     ul_pin: u32,
     vh_pin: u32,
@@ -238,7 +325,6 @@ struct DriveAfReadback {
     wl_af: u32,
 
     af_ok: u32,
-    wh_only_active: u32,
 }
 
 #[derive(Copy, Clone)]
@@ -246,21 +332,26 @@ struct Tim1Readback {
     cnt_a: u32,
     cnt_b: u32,
     counting: u32,
-    arr: u32,
-    ccr1: u32,
-    ccr2: u32,
-    ccr3: u32,
     ccer: u32,
     bdtr: u32,
-    cr2: u32,
     ccmr1: u32,
     ccmr2: u32,
     moe: u32,
     ossi: u32,
     ossr: u32,
-    ccer_expected: u32,
     forced_modes_ok: u32,
-    tim1_register_ok: u32,
+    tim1_basic_ok: u32,
+}
+
+#[derive(Copy, Clone)]
+struct AdcSnapshot {
+    pot_raw: u16,
+    temp_raw: u16,
+    vbus_raw: u16,
+    op1_raw: u16,
+    op2_raw: u16,
+    op3_raw: u16,
+    timeout: u32,
 }
 
 // ------------------------------------------------------------
@@ -332,6 +423,14 @@ fn led_low() {
     }
 }
 
+fn led_for_state(state: TwitchState) {
+    if state.active_led() {
+        led_high();
+    } else {
+        led_low();
+    }
+}
+
 fn button_pressed() -> bool {
     let idr = unsafe { read_volatile(GPIOC_IDR) };
     (idr & (1 << USER_BUTTON_PIN)) == 0
@@ -352,7 +451,7 @@ fn force_drive_output_latches_low() {
     }
 }
 
-fn read_drive_af() -> DriveAfReadback {
+fn read_drive() -> DriveReadback {
     let uh_pin = read_pin(GPIOA_IDR, DRIVE_UH_PIN);
     let vh_pin = read_pin(GPIOA_IDR, DRIVE_VH_PIN);
     let wh_pin = read_pin(GPIOA_IDR, DRIVE_WH_PIN);
@@ -392,19 +491,7 @@ fn read_drive_af() -> DriveAfReadback {
         0
     };
 
-    let wh_only_active = if uh_pin == 0
-        && ul_pin == 0
-        && vh_pin == 0
-        && vl_pin == 0
-        && wh_pin == 1
-        && wl_pin == 0
-    {
-        1
-    } else {
-        0
-    };
-
-    DriveAfReadback {
+    DriveReadback {
         uh_pin,
         ul_pin,
         vh_pin,
@@ -424,52 +511,74 @@ fn read_drive_af() -> DriveAfReadback {
         wh_af,
         wl_af,
         af_ok,
-        wh_only_active,
     }
 }
 
+fn pins_match_state(drive: DriveReadback, state: TwitchState) -> u32 {
+    let expected = state.expected_pins();
+
+    if drive.uh_pin == expected.0
+        && drive.ul_pin == expected.1
+        && drive.vh_pin == expected.2
+        && drive.vl_pin == expected.3
+        && drive.wh_pin == expected.4
+        && drive.wl_pin == expected.5
+    {
+        1
+    } else {
+        0
+    }
+}
+
+fn no_phase_overlap(drive: DriveReadback) -> u32 {
+    if (drive.uh_pin == 1 && drive.ul_pin == 1)
+        || (drive.vh_pin == 1 && drive.vl_pin == 1)
+        || (drive.wh_pin == 1 && drive.wl_pin == 1)
+    {
+        0
+    } else {
+        1
+    }
+}
+
+fn active_pin_count(drive: DriveReadback) -> u32 {
+    drive.uh_pin + drive.ul_pin + drive.vh_pin + drive.vl_pin + drive.wh_pin + drive.wl_pin
+}
+
 // ------------------------------------------------------------
-// Delay helpers
+// Delay helper
 // ------------------------------------------------------------
 
 fn delay_cycles(cycles: u32) {
     asm::delay(cycles);
 }
 
-fn delay_fast_button() {
-    asm::delay(650_000);
-}
-
 // ------------------------------------------------------------
 // TIM1 helpers
 // ------------------------------------------------------------
 
-fn set_tim1_wh_only_modes() {
+fn set_tim1_modes_for_state(state: TwitchState) {
     unsafe {
-        // CH3 forced active with CC3E enabled and CC3NE disabled.
-        // Expected input state is WH=1 and WL=0.
-        // CH1/CH2 remain forced inactive and disabled.
         let ccmr1 =
-            (TIM1_CCMR_FORCED_INACTIVE << 4) |
-            (TIM1_CCMR_FORCED_INACTIVE << 12);
+            (state.ch1_mode() << 4) |
+            (state.ch2_mode() << 12);
 
-        let ccmr2 = TIM1_CCMR_FORCED_ACTIVE << 4;
+        let ccmr2 = state.ch3_mode() << 4;
 
         write_volatile(TIM1_CCMR1, ccmr1);
         write_volatile(TIM1_CCMR2, ccmr2);
     }
 }
 
-fn enforce_tim1_wh_only_active() {
+fn apply_state(state: TwitchState) {
     unsafe {
         write_volatile(TIM1_CCR1, 0);
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
-        set_tim1_wh_only_modes();
+        set_tim1_modes_for_state(state);
 
-        // WH only: CC3E enabled, CC3NE disabled.
-        write_volatile(TIM1_CCER, TIM1_CCER_WH_ONLY_ACTIVE);
+        write_volatile(TIM1_CCER, state.expected_ccer());
 
         let mut bdtr = read_volatile(TIM1_BDTR);
         bdtr |= TIM1_BDTR_OSSI;
@@ -477,15 +586,16 @@ fn enforce_tim1_wh_only_active() {
         bdtr |= TIM1_BDTR_MOE;
         write_volatile(TIM1_BDTR, bdtr);
     }
+
+    led_for_state(state);
 }
 
-fn read_tim1() -> Tim1Readback {
+fn read_tim1_for_state(state: TwitchState) -> Tim1Readback {
     unsafe {
         let cnt_a = read_volatile(TIM1_CNT);
         asm::delay(16_000);
         let cnt_b = read_volatile(TIM1_CNT);
 
-        let arr = read_volatile(TIM1_ARR);
         let ccr1 = read_volatile(TIM1_CCR1);
         let ccr2 = read_volatile(TIM1_CCR2);
         let ccr3 = read_volatile(TIM1_CCR3);
@@ -500,19 +610,13 @@ fn read_tim1() -> Tim1Readback {
         let ossi = if (bdtr & TIM1_BDTR_OSSI) != 0 { 1 } else { 0 };
         let ossr = if (bdtr & TIM1_BDTR_OSSR) != 0 { 1 } else { 0 };
 
-        let ccer_expected = if ccer == TIM1_CCER_WH_ONLY_ACTIVE {
-            1
-        } else {
-            0
-        };
-
         let oc1m = (ccmr1 >> 4) & 0b111;
         let oc2m = (ccmr1 >> 12) & 0b111;
         let oc3m = (ccmr2 >> 4) & 0b111;
 
-        let forced_modes_ok = if oc1m == TIM1_CCMR_FORCED_INACTIVE
-            && oc2m == TIM1_CCMR_FORCED_INACTIVE
-            && oc3m == TIM1_CCMR_FORCED_ACTIVE
+        let forced_modes_ok = if oc1m == state.ch1_mode()
+            && oc2m == state.ch2_mode()
+            && oc3m == state.ch3_mode()
         {
             1
         } else {
@@ -521,8 +625,8 @@ fn read_tim1() -> Tim1Readback {
 
         let idle_bits = (cr2 >> 8) & 0b11_1111;
 
-        let tim1_register_ok = if counting == 1
-            && ccer_expected == 1
+        let tim1_basic_ok = if counting == 1
+            && ccer == state.expected_ccer()
             && moe == 1
             && ossi == 1
             && ossr == 1
@@ -541,26 +645,20 @@ fn read_tim1() -> Tim1Readback {
             cnt_a,
             cnt_b,
             counting,
-            arr,
-            ccr1,
-            ccr2,
-            ccr3,
             ccer,
             bdtr,
-            cr2,
             ccmr1,
             ccmr2,
             moe,
             ossi,
             ossr,
-            ccer_expected,
             forced_modes_ok,
-            tim1_register_ok,
+            tim1_basic_ok,
         }
     }
 }
 
-fn setup_tim1_wh_only_active() {
+fn setup_tim1_base() {
     unsafe {
         let apb2enr = read_volatile(RCC_APB2ENR);
         write_volatile(RCC_APB2ENR, apb2enr | RCC_APB2ENR_TIM1EN);
@@ -582,12 +680,12 @@ fn setup_tim1_wh_only_active() {
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
-        set_tim1_wh_only_modes();
+        set_tim1_modes_for_state(TwitchState::IdleAllOff);
 
         write_volatile(TIM1_EGR, TIM1_EGR_UG);
         write_volatile(TIM1_CR1, TIM1_CR1_ARPE | TIM1_CR1_CEN);
 
-        enforce_tim1_wh_only_active();
+        apply_state(TwitchState::IdleAllOff);
     }
 }
 
@@ -652,42 +750,40 @@ fn adc_read_channel_raw(adc_base: usize, channel: u32) -> u16 {
     ADC_TIMEOUT_VALUE
 }
 
-fn adc_live_percent(raw: u16) -> u32 {
-    let clamped_raw = if raw > 4095 { 2048 } else { raw };
-    ((clamped_raw as u32) * 100) / 4095
-}
-
 fn adc_delta(current: u16, baseline: u16) -> i32 {
     (current as i32) - (baseline as i32)
 }
 
-fn pot_to_delay(raw: u16) -> u32 {
-    let clamped_raw = if raw > 4095 { 2048 } else { raw };
-    let raw_u64 = clamped_raw as u64;
+fn read_adc_snapshot() -> AdcSnapshot {
+    let pot_raw = adc_read_channel_raw(ADC1_BASE, POT_ADC_CHANNEL);
+    let temp_raw = adc_read_channel_raw(ADC1_BASE, TEMP_ADC_CHANNEL);
+    let vbus_raw = adc_read_channel_raw(ADC1_BASE, VBUS_ADC_CHANNEL);
 
-    let fast_delay: u64 = 650_000;
-    let slow_delay: u64 = 4_000_000;
-    let span: u64 = slow_delay - fast_delay;
+    let op1_raw = adc_read_channel_raw(ADC1_BASE, OP1_OUT_ADC_CHANNEL);
+    let op2_raw = adc_read_channel_raw(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
+    let op3_raw = adc_read_channel_raw(ADC1_BASE, OP3_OUT_ADC_CHANNEL);
 
-    let delay = slow_delay - ((raw_u64 * span) / 4095);
+    let timeout = if pot_raw == ADC_TIMEOUT_VALUE
+        || temp_raw == ADC_TIMEOUT_VALUE
+        || vbus_raw == ADC_TIMEOUT_VALUE
+        || op1_raw == ADC_TIMEOUT_VALUE
+        || op2_raw == ADC_TIMEOUT_VALUE
+        || op3_raw == ADC_TIMEOUT_VALUE
+    {
+        1
+    } else {
+        0
+    };
 
-    delay as u32
-}
-
-fn blink_with_delay(delay: u32) {
-    led_high();
-    delay_cycles(delay);
-
-    led_low();
-    delay_cycles(delay);
-}
-
-fn blink_fast_button_override() {
-    led_high();
-    delay_fast_button();
-
-    led_low();
-    delay_fast_button();
+    AdcSnapshot {
+        pot_raw,
+        temp_raw,
+        vbus_raw,
+        op1_raw,
+        op2_raw,
+        op3_raw,
+        timeout,
+    }
 }
 
 // ------------------------------------------------------------
@@ -836,7 +932,7 @@ fn setup_drive_pins_tim1_af() {
         gpioc_ospeedr &= !(0b11 << (DRIVE_UL_PIN * 2));
         write_volatile(GPIOC_OSPEEDR, gpioc_ospeedr);
 
-        enforce_tim1_wh_only_active();
+        apply_state(TwitchState::IdleAllOff);
     }
 }
 
@@ -933,6 +1029,165 @@ fn setup_adc_for_board_monitor() -> (u32, u32) {
 }
 
 // ------------------------------------------------------------
+// Logging / sequence
+// ------------------------------------------------------------
+
+fn log_state(
+    cycle: u32,
+    step: u32,
+    state: TwitchState,
+    baseline: AdcSnapshot,
+) -> u32 {
+    delay_cycles(STATE_SETTLE_DELAY);
+
+    let drive = read_drive();
+    let tim1 = read_tim1_for_state(state);
+    let adc = read_adc_snapshot();
+
+    let pins_ok = pins_match_state(drive, state);
+    let no_overlap = no_phase_overlap(drive);
+    let active_count = active_pin_count(drive);
+
+    let expected = state.expected_pins();
+    let expected_active_count = expected.0 + expected.1 + expected.2 + expected.3 + expected.4 + expected.5;
+
+    let active_count_ok = if active_count == expected_active_count {
+        1
+    } else {
+        0
+    };
+
+    let state_ok = if drive.af_ok == 1
+        && pins_ok == 1
+        && no_overlap == 1
+        && active_count_ok == 1
+        && tim1.tim1_basic_ok == 1
+        && adc.timeout == 0
+    {
+        1
+    } else {
+        0
+    };
+
+    rprintln!(
+        "cycle={} step={} state={} state_ok={} button={} af_ok={} pins_ok={} no_phase_overlap={} active_count={} active_count_ok={} tim1_ok={} expected_ccer={} tim1_ccer={} tim1_moe={} forced_modes_ok={} UH={} UL={} VH={} VL={} WH={} WL={} exp_UH={} exp_UL={} exp_VH={} exp_VL={} exp_WH={} exp_WL={} cnt_a={} cnt_b={} ccmr1={} ccmr2={} bdtr={} pot_raw={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} timeout={}",
+        cycle,
+        step,
+        state.name(),
+        state_ok,
+        if button_pressed() { 1 } else { 0 },
+        drive.af_ok,
+        pins_ok,
+        no_overlap,
+        active_count,
+        active_count_ok,
+        tim1.tim1_basic_ok,
+        state.expected_ccer(),
+        tim1.ccer,
+        tim1.moe,
+        tim1.forced_modes_ok,
+        drive.uh_pin,
+        drive.ul_pin,
+        drive.vh_pin,
+        drive.vl_pin,
+        drive.wh_pin,
+        drive.wl_pin,
+        expected.0,
+        expected.1,
+        expected.2,
+        expected.3,
+        expected.4,
+        expected.5,
+        tim1.cnt_a,
+        tim1.cnt_b,
+        tim1.ccmr1,
+        tim1.ccmr2,
+        tim1.bdtr,
+        adc.pot_raw,
+        adc.temp_raw,
+        adc_delta(adc.temp_raw, baseline.temp_raw),
+        adc.vbus_raw,
+        adc_delta(adc.vbus_raw, baseline.vbus_raw),
+        adc.op1_raw,
+        adc_delta(adc.op1_raw, baseline.op1_raw),
+        adc.op2_raw,
+        adc_delta(adc.op2_raw, baseline.op2_raw),
+        adc.op3_raw,
+        adc_delta(adc.op3_raw, baseline.op3_raw),
+        adc.timeout
+    );
+
+    state_ok
+}
+
+fn run_state(
+    cycle: u32,
+    step: u32,
+    state: TwitchState,
+    hold_delay: u32,
+    baseline: AdcSnapshot,
+) -> u32 {
+    apply_state(state);
+    let state_ok = log_state(cycle, step, state, baseline);
+    delay_cycles(hold_delay);
+    state_ok
+}
+
+fn run_single_twitch(cycle: u32, baseline: AdcSnapshot) -> u32 {
+    let mut cycle_ok = 1;
+
+    cycle_ok &= run_state(
+        cycle,
+        1,
+        TwitchState::IdleAllOff,
+        DEADTIME_DELAY,
+        baseline,
+    );
+
+    cycle_ok &= run_state(
+        cycle,
+        2,
+        TwitchState::UBootstrapChargeUl,
+        BOOTSTRAP_HOLD_DELAY,
+        baseline,
+    );
+
+    cycle_ok &= run_state(
+        cycle,
+        3,
+        TwitchState::DeadtimeAfterUl,
+        DEADTIME_DELAY,
+        baseline,
+    );
+
+    cycle_ok &= run_state(
+        cycle,
+        4,
+        TwitchState::TwitchDriveUhVl,
+        TWITCH_HOLD_DELAY,
+        baseline,
+    );
+
+    cycle_ok &= run_state(
+        cycle,
+        5,
+        TwitchState::AllOffAfterTwitch,
+        AFTER_TWITCH_DELAY,
+        baseline,
+    );
+
+    apply_state(TwitchState::IdleAllOff);
+
+    rprintln!(
+        "twitch_summary cycle={} cycle_ok={} twitch_vector=UH_plus_VL motor_test_note=no_prop_low_voltage_current_limit",
+        cycle,
+        cycle_ok
+    );
+
+    cycle_ok
+}
+
+// ------------------------------------------------------------
 // Main
 // ------------------------------------------------------------
 
@@ -941,250 +1196,100 @@ fn main() -> ! {
     rtt_init_print!();
 
     setup_gpio_base();
-    setup_tim1_wh_only_active();
+    setup_tim1_base();
     setup_drive_pins_tim1_af();
 
-    enforce_tim1_wh_only_active();
+    apply_state(TwitchState::IdleAllOff);
 
     let (adc1_setup_status, adc2_setup_status) = setup_adc_for_board_monitor();
 
-    let drive_startup = read_drive_af();
-    let tim1_startup = read_tim1();
+    let baseline = read_adc_snapshot();
+    let startup_drive = read_drive();
+    let startup_tim1 = read_tim1_for_state(TwitchState::IdleAllOff);
 
-    let startup_wh_test_ok = if drive_startup.af_ok == 1
-        && drive_startup.wh_only_active == 1
-        && tim1_startup.tim1_register_ok == 1
+    let startup_pins_ok = pins_match_state(startup_drive, TwitchState::IdleAllOff);
+
+    let startup_ok = if startup_drive.af_ok == 1
+        && startup_pins_ok == 1
+        && no_phase_overlap(startup_drive) == 1
+        && startup_tim1.tim1_basic_ok == 1
+        && baseline.timeout == 0
     {
         1
     } else {
         0
     };
 
-    let temp_startup_raw = adc_read_channel_raw(ADC1_BASE, TEMP_ADC_CHANNEL);
-    let vbus_startup_raw = adc_read_channel_raw(ADC1_BASE, VBUS_ADC_CHANNEL);
-
-    let op1_startup_raw = adc_read_channel_raw(ADC1_BASE, OP1_OUT_ADC_CHANNEL);
-    let op2_startup_raw = adc_read_channel_raw(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
-    let op3_startup_raw = adc_read_channel_raw(ADC1_BASE, OP3_OUT_ADC_CHANNEL);
-
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.2.11-single-high-side-wh-command");
-    rprintln!("Drive pins are TIM1 alternate function.");
-    rprintln!("TIM1 deliberate test state: WH high-side input command only.");
-    rprintln!("Expected pins: UH=0 UL=0 VH=0 VL=0 WH=1 WL=0.");
-    rprintln!("No motor. No PWM. One high-side input command only.");
-    rprintln!("This proves the MCU/TIM1 input command path, not the actual high-side MOSFET gate voltage.");
+    rprintln!("Version: v0.2.14-button-gated-u-twitch-prep");
+    rprintln!("Mode: button-gated single U->V twitch prep");
+    rprintln!("Default state is all outputs off.");
+    rprintln!("Button press runs one short sequence:");
+    rprintln!("  idle_all_off            UH=0 UL=0 VH=0 VL=0 WH=0 WL=0");
+    rprintln!("  u_bootstrap_charge_ul   UH=0 UL=1 VH=0 VL=0 WH=0 WL=0");
+    rprintln!("  deadtime_after_ul       UH=0 UL=0 VH=0 VL=0 WH=0 WL=0");
+    rprintln!("  twitch_drive_uh_vl      UH=1 UL=0 VH=0 VL=1 WH=0 WL=0");
+    rprintln!("  all_off_after_twitch    UH=0 UL=0 VH=0 VL=0 WH=0 WL=0");
+    rprintln!("Safety: test no motor first.");
+    rprintln!("Motor test later: no prop, low voltage, strict current limit, short button tap only.");
     rprintln!("ADC1 setup status: {}", adc1_setup_status);
     rprintln!("ADC2 setup status: {}", adc2_setup_status);
 
     rprintln!(
-        "drive_startup: af_ok={} wh_only_active={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} UH_mode={} UL_mode={} VH_mode={} VL_mode={} WH_mode={} WL_mode={} UH_af={} UL_af={} VH_af={} VL_af={} WH_af={} WL_af={}",
-        drive_startup.af_ok,
-        drive_startup.wh_only_active,
-        drive_startup.uh_pin,
-        drive_startup.ul_pin,
-        drive_startup.vh_pin,
-        drive_startup.vl_pin,
-        drive_startup.wh_pin,
-        drive_startup.wl_pin,
-        drive_startup.uh_mode,
-        drive_startup.ul_mode,
-        drive_startup.vh_mode,
-        drive_startup.vl_mode,
-        drive_startup.wh_mode,
-        drive_startup.wl_mode,
-        drive_startup.uh_af,
-        drive_startup.ul_af,
-        drive_startup.vh_af,
-        drive_startup.vl_af,
-        drive_startup.wh_af,
-        drive_startup.wl_af
+        "startup: startup_ok={} af_ok={} pins_ok={} no_phase_overlap={} tim1_ok={} UH={} UL={} VH={} VL={} WH={} WL={} ccer={} moe={} forced_modes_ok={} pot_raw={} temp_raw={} vbus_raw={} op1_raw={} op2_raw={} op3_raw={} timeout={}",
+        startup_ok,
+        startup_drive.af_ok,
+        startup_pins_ok,
+        no_phase_overlap(startup_drive),
+        startup_tim1.tim1_basic_ok,
+        startup_drive.uh_pin,
+        startup_drive.ul_pin,
+        startup_drive.vh_pin,
+        startup_drive.vl_pin,
+        startup_drive.wh_pin,
+        startup_drive.wl_pin,
+        startup_tim1.ccer,
+        startup_tim1.moe,
+        startup_tim1.forced_modes_ok,
+        baseline.pot_raw,
+        baseline.temp_raw,
+        baseline.vbus_raw,
+        baseline.op1_raw,
+        baseline.op2_raw,
+        baseline.op3_raw,
+        baseline.timeout
     );
 
-    rprintln!(
-        "tim1_startup: startup_wh_test_ok={} tim1_register_ok={} counting={} cnt_a={} cnt_b={} arr={} ccr1={} ccr2={} ccr3={} ccer={} ccer_expected={} bdtr={} cr2={} ccmr1={} ccmr2={} moe={} ossi={} ossr={} forced_modes_ok={}",
-        startup_wh_test_ok,
-        tim1_startup.tim1_register_ok,
-        tim1_startup.counting,
-        tim1_startup.cnt_a,
-        tim1_startup.cnt_b,
-        tim1_startup.arr,
-        tim1_startup.ccr1,
-        tim1_startup.ccr2,
-        tim1_startup.ccr3,
-        tim1_startup.ccer,
-        tim1_startup.ccer_expected,
-        tim1_startup.bdtr,
-        tim1_startup.cr2,
-        tim1_startup.ccmr1,
-        tim1_startup.ccmr2,
-        tim1_startup.moe,
-        tim1_startup.ossi,
-        tim1_startup.ossr,
-        tim1_startup.forced_modes_ok
-    );
-
-    rprintln!("temp_startup_raw: {}", temp_startup_raw);
-    rprintln!("vbus_startup_raw: {}", vbus_startup_raw);
-    rprintln!("op1_startup_raw: {}", op1_startup_raw);
-    rprintln!("op2_startup_raw: {}", op2_startup_raw);
-    rprintln!("op3_startup_raw: {}", op3_startup_raw);
-    rprintln!("Output format:");
-    rprintln!("button=<0/1> wh_test_ok=<0/1> tim1_register_ok=<0/1> af_ok=<0/1> wh_only_active=<0/1> tim1_counting=<0/1> tim1_ccer=<raw> tim1_moe=<0/1> forced_modes_ok=<0/1> pot_raw=<raw> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> timeout=<0/1>");
+    rprintln!("Expected idle: state_ok=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0");
+    rprintln!("Expected twitch state: state=twitch_drive_uh_vl state_ok=1 UH=1 VL=1 active_count=2 no_phase_overlap=1");
     rprintln!("================================================");
 
-    led_low();
+    let mut cycle: u32 = 1;
 
     loop {
-        enforce_tim1_wh_only_active();
-
-        let drive = read_drive_af();
-        let tim1 = read_tim1();
-
-        let wh_test_ok = if drive.af_ok == 1
-            && drive.wh_only_active == 1
-            && tim1.tim1_register_ok == 1
-        {
-            1
-        } else {
-            0
-        };
-
-        let pot_raw = adc_read_channel_raw(ADC1_BASE, POT_ADC_CHANNEL);
-        let temp_raw = adc_read_channel_raw(ADC1_BASE, TEMP_ADC_CHANNEL);
-        let vbus_raw = adc_read_channel_raw(ADC1_BASE, VBUS_ADC_CHANNEL);
-
-        let op1_raw = adc_read_channel_raw(ADC1_BASE, OP1_OUT_ADC_CHANNEL);
-        let op2_raw = adc_read_channel_raw(ADC2_BASE, OP2_OUT_ADC_CHANNEL);
-        let op3_raw = adc_read_channel_raw(ADC1_BASE, OP3_OUT_ADC_CHANNEL);
-
-        let pot_timeout = pot_raw == ADC_TIMEOUT_VALUE;
-        let temp_timeout = temp_raw == ADC_TIMEOUT_VALUE;
-        let vbus_timeout = vbus_raw == ADC_TIMEOUT_VALUE;
-        let op1_timeout = op1_raw == ADC_TIMEOUT_VALUE;
-        let op2_timeout = op2_raw == ADC_TIMEOUT_VALUE;
-        let op3_timeout = op3_raw == ADC_TIMEOUT_VALUE;
-
-        let timeout = pot_timeout
-            || temp_timeout
-            || vbus_timeout
-            || op1_timeout
-            || op2_timeout
-            || op3_timeout;
-
-        let live_pot_raw = if pot_timeout { 2048 } else { pot_raw };
-        let live_temp_raw = if temp_timeout { temp_startup_raw } else { temp_raw };
-        let live_vbus_raw = if vbus_timeout { vbus_startup_raw } else { vbus_raw };
-
-        let live_op1_raw = if op1_timeout { op1_startup_raw } else { op1_raw };
-        let live_op2_raw = if op2_timeout { op2_startup_raw } else { op2_raw };
-        let live_op3_raw = if op3_timeout { op3_startup_raw } else { op3_raw };
-
-        let pot_pct = adc_live_percent(live_pot_raw);
-        let temp_delta = adc_delta(live_temp_raw, temp_startup_raw);
-        let vbus_delta = adc_delta(live_vbus_raw, vbus_startup_raw);
-
-        let op1_delta = adc_delta(live_op1_raw, op1_startup_raw);
-        let op2_delta = adc_delta(live_op2_raw, op2_startup_raw);
-        let op3_delta = adc_delta(live_op3_raw, op3_startup_raw);
-
-        let delay = pot_to_delay(live_pot_raw);
-
         if button_pressed() {
+            let cycle_ok = run_single_twitch(cycle, baseline);
+
+            apply_state(TwitchState::WaitButtonRelease);
+            log_state(cycle, 6, TwitchState::WaitButtonRelease, baseline);
+
+            while button_pressed() {
+                apply_state(TwitchState::WaitButtonRelease);
+                delay_cycles(WAIT_RELEASE_DELAY);
+            }
+
             rprintln!(
-                "button=1 wh_test_ok={} tim1_register_ok={} af_ok={} wh_only_active={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_modes_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
-                wh_test_ok,
-                tim1.tim1_register_ok,
-                drive.af_ok,
-                drive.wh_only_active,
-                tim1.counting,
-                tim1.cnt_a,
-                tim1.cnt_b,
-                tim1.arr,
-                tim1.ccr1,
-                tim1.ccr2,
-                tim1.ccr3,
-                tim1.ccer,
-                tim1.ccer_expected,
-                tim1.bdtr,
-                tim1.cr2,
-                tim1.ccmr1,
-                tim1.ccmr2,
-                tim1.moe,
-                tim1.ossi,
-                tim1.ossr,
-                tim1.forced_modes_ok,
-                drive.uh_pin,
-                drive.ul_pin,
-                drive.vh_pin,
-                drive.vl_pin,
-                drive.wh_pin,
-                drive.wl_pin,
-                live_pot_raw,
-                pot_pct,
-                live_temp_raw,
-                temp_delta,
-                live_vbus_raw,
-                vbus_delta,
-                live_op1_raw,
-                op1_delta,
-                live_op2_raw,
-                op2_delta,
-                live_op3_raw,
-                op3_delta,
-                650_000,
-                if timeout { 1 } else { 0 }
+                "button_release cycle={} prior_twitch_ok={} outputs=all_off",
+                cycle,
+                cycle_ok
             );
 
-            blink_fast_button_override();
+            cycle = cycle.wrapping_add(1);
         } else {
-            rprintln!(
-                "button=0 wh_test_ok={} tim1_register_ok={} af_ok={} wh_only_active={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_ccmr1={} tim1_ccmr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} forced_modes_ok={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
-                wh_test_ok,
-                tim1.tim1_register_ok,
-                drive.af_ok,
-                drive.wh_only_active,
-                tim1.counting,
-                tim1.cnt_a,
-                tim1.cnt_b,
-                tim1.arr,
-                tim1.ccr1,
-                tim1.ccr2,
-                tim1.ccr3,
-                tim1.ccer,
-                tim1.ccer_expected,
-                tim1.bdtr,
-                tim1.cr2,
-                tim1.ccmr1,
-                tim1.ccmr2,
-                tim1.moe,
-                tim1.ossi,
-                tim1.ossr,
-                tim1.forced_modes_ok,
-                drive.uh_pin,
-                drive.ul_pin,
-                drive.vh_pin,
-                drive.vl_pin,
-                drive.wh_pin,
-                drive.wl_pin,
-                live_pot_raw,
-                pot_pct,
-                live_temp_raw,
-                temp_delta,
-                live_vbus_raw,
-                vbus_delta,
-                live_op1_raw,
-                op1_delta,
-                live_op2_raw,
-                op2_delta,
-                live_op3_raw,
-                op3_delta,
-                delay,
-                if timeout { 1 } else { 0 }
-            );
-
-            blink_with_delay(delay);
+            apply_state(TwitchState::IdleAllOff);
+            log_state(cycle, 0, TwitchState::IdleAllOff, baseline);
+            delay_cycles(IDLE_LOG_DELAY);
         }
     }
 }
@@ -1192,7 +1297,7 @@ fn main() -> ! {
 // ================================================================
 // Footer
 // File: main.rs
-// Version: v0.2.11-single-high-side-wh-command
+// Version: v0.2.14-button-gated-u-twitch-prep
 // Created: 2026-06-07
 // Generated timestamp: 2026-06-07
 // ================================================================

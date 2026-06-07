@@ -5,37 +5,28 @@ Rust bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431C
 Current confirmed milestone:
 
 ```text
-v0.2.11-single-high-side-wh-command
+v0.2.14-button-gated-u-twitch-prep
 ```
 
-This project is focused on safe, step-by-step board bring-up before attempting to spin a BLDC motor.
+Major milestone:
+
+```text
+First motor-connected twitch test passed.
+```
+
+The motor was connected with no prop, powered from a current-limited bench supply at about 8 V, and each button press produced a small physical twitch/jump. The firmware returned to all-off after each pulse.
 
 ---
 
 ## Hardware
 
-Board:
-
 ```text
-ST B-G431B-ESC1 Discovery kit
-STM32G431CB MCU
-L6387 gate drivers
-STL180N6F7 MOSFETs
-```
-
-Development/debug:
-
-```text
-ST-LINK/V2-1
-probe-rs / cargo-embed
-RTT logging
-Ubuntu host
-```
-
-Current target:
-
-```text
-thumbv7em-none-eabihf
+Board: ST B-G431B-ESC1 Discovery kit
+MCU: STM32G431CB
+Gate drivers: L6387
+MOSFETs: STL180N6F7
+Debug/logging: ST-LINK/V2-1, probe-rs, cargo-embed, RTT
+Target: thumbv7em-none-eabihf
 ```
 
 Confirmed probe:
@@ -73,8 +64,6 @@ probe-rs attach --chip STM32G431CB target/thumbv7em-none-eabihf/release/b-g431b-
 
 ## Confirmed board signals
 
-From schematic and bring-up testing:
-
 ```text
 PC6   STATUS LED
 PC10  user button input
@@ -97,7 +86,7 @@ PA10  WH / TIM1_CH3
 PB15  WL / TIM1_CH3N
 ```
 
-Confirmed alternate functions used:
+Confirmed alternate functions:
 
 ```text
 PA8   AF6
@@ -110,9 +99,9 @@ PC13  AF4
 
 ---
 
-## Bring-up history
+## Bring-up summary
 
-### v0.1.x GPIO / ADC / RTT
+### GPIO / ADC / RTT
 
 Confirmed:
 
@@ -129,450 +118,79 @@ RTT logging works through probe-rs.
 Observed behavior:
 
 ```text
-Potentiometer controls LED blink/log rate.
+Potentiometer controls LED blink/log rate in earlier versions.
 Temperature raw value rises when the ESC board is warmed by hand.
 VBUS raw value rises when external ESC power input is raised.
 ```
 
 ---
 
-### v0.2.0 drive pins safe-low
+## Drive-output bring-up milestones
 
-Confirmed all six L6387 input pins can be configured as GPIO outputs and held low:
+### Safe low and TIM1 setup
 
-```text
-UH=0
-UL=0
-VH=0
-VL=0
-WH=0
-WL=0
-drive_safe=1
-```
-
-No motor connected.
-
----
-
-### v0.2.1 TIM1 internal counter, MOE off
-
-Confirmed TIM1 can be configured and run internally while drive pins remain GPIO LOW.
-
-Expected/confirmed fields:
+Confirmed across early v0.2.x versions:
 
 ```text
-tim1_counting=1
-tim1_arr=3999
-tim1_ccr1=0
-tim1_ccr2=0
-tim1_ccr3=0
-tim1_ccer=0
-tim1_moe=0
-drive_safe=1
+All six drive inputs can be held low.
+TIM1 can run internally.
+TIM1 alternate-function routing works.
+TIM1 CCER and MOE can be configured safely.
+Forced-inactive all-low state works after complementary polarity correction.
 ```
-
-No motor connected.
-
----
-
-### v0.2.2 TIM1 alternate-function pins, MOE off
-
-Confirmed the six drive pins can be moved to TIM1 alternate-function mode while TIM1 outputs remain disabled.
-
-Expected/confirmed fields:
-
-```text
-af_ok=1
-tim1_counting=1
-tim1_ccer=0
-tim1_moe=0
-UH_af=6
-VH_af=6
-WH_af=6
-VL_af=6
-WL_af=4
-UL_af=4
-```
-
-No motor connected.
-
----
-
-### v0.2.3-fix1 TIM1 CCER enabled, MOE off
-
-Confirmed TIM1 CC output enable bits can be configured while the main output enable remains off.
-
-Expected/confirmed fields:
-
-```text
-safety_ok=1
-af_ok=1
-tim1_counting=1
-tim1_ccer=1365
-tim1_ccer_expected=1
-tim1_moe=0
-tim1_ossi=1
-tim1_ccr1=0
-tim1_ccr2=0
-tim1_ccr3=0
-```
-
-No motor connected.
-
----
-
-### v0.2.4 TIM1 MOE on, CCER off
-
-Confirmed TIM1 main output enable can be set while CCER remains disabled.
-
-Expected/confirmed fields:
-
-```text
-safety_ok=1
-af_ok=1
-tim1_counting=1
-tim1_ccer=0
-tim1_moe=1
-tim1_ossi=1
-tim1_ossr=1
-tim1_ccr1=0
-tim1_ccr2=0
-tim1_ccr3=0
-```
-
-No motor connected.
-
----
-
-### v0.2.5 first attempt: forced inactive, CCER on, MOE on
 
 Important finding:
 
 ```text
 Forced inactive with normal complementary polarity did not make all six drive inputs low.
 UH/VH/WH were low, but UL/VL/WL read high.
+The corrected all-low forced-inactive state used inverted complementary output polarity.
 ```
 
-This version was not treated as a passed milestone.
-
----
-
-### v0.2.5-fix1 forced inactive all-low
-
-Confirmed version:
+Known good all-off forced-low state:
 
 ```text
-v0.2.5-fix1-tim1-forced-inactive-all-low
-```
-
-This version:
-
-```text
-TIM1 pins are alternate function.
-TIM1 counter is running.
-CCER is enabled.
-MOE is enabled.
-Channels are forced inactive.
-Complementary output polarity is inverted so all six drive inputs read low.
-CCR1/2/3 remain zero.
-No PWM duty is applied.
-No intentional gate switching is commanded.
-```
-
-Expected/confirmed fields:
-
-```text
-startup_overall_safe=1
-overall_safe=1
-tim1_register_ok=1
-af_ok=1
-pins_low=1
-tim1_counting=1
-tim1_ccer=3549
-tim1_ccer_expected=1
-tim1_moe=1
-tim1_ossi=1
-tim1_ossr=1
-forced_inactive_ok=1
-
-UH_pin=0
-UL_pin=0
-VH_pin=0
-VL_pin=0
-WH_pin=0
-WL_pin=0
-```
-
-External VBUS no-motor test:
-
-```text
-Bench supply was applied up to about 10 V.
-Motor disconnected.
-Board stayed cold.
-Supply current appeared negligible.
-VBUS ADC responded correctly and returned to USB baseline when supply was lowered/removed.
+expected_ccer=3549
+UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
 ```
 
 ---
 
-## Low-side command-path tests
+## Six individual command paths confirmed
 
-These tests deliberately commanded one low-side driver input high at a time.
-
-Important limitation:
+Low-side command paths:
 
 ```text
-Confirmed: STM32/TIM1 to gate-driver input command path.
-Not directly confirmed: actual MOSFET gate voltage or switching waveform.
+v0.2.6-fix2  UL low-side passed
+v0.2.7       VL low-side passed
+v0.2.8       WL low-side passed
 ```
 
-No motor was connected for any of these tests.
-
----
-
-### v0.2.6-fix2 UL low-side only
-
-Confirmed:
+Representative confirmed values:
 
 ```text
-ul_test_ok=1
-tim1_register_ok=1
-af_ok=1
-ul_only_active=1
-tim1_counting=1
-tim1_ccer=5
-tim1_ccer_expected=1
-tim1_moe=1
-forced_modes_ok=1
-
-UH_pin=0
-UL_pin=1
-VH_pin=0
-VL_pin=0
-WH_pin=0
-WL_pin=0
+UL only: tim1_ccer=5     UH=0 UL=1 VH=0 VL=0 WH=0 WL=0
+VL only: tim1_ccer=80    UH=0 UL=0 VH=0 VL=1 WH=0 WL=0
+WL only: tim1_ccer=1280  UH=0 UL=0 VH=0 VL=0 WH=0 WL=1
 ```
 
-External VBUS test:
+High-side input-command paths:
 
 ```text
-Motor disconnected.
-Bench supply applied.
-No meaningful supply current draw.
-Board stayed cold.
+v0.2.9   UH high-side input command passed
+v0.2.10  VH high-side input command passed
+v0.2.11  WH high-side input command passed
 ```
 
----
-
-### v0.2.7 VL low-side only
-
-Confirmed:
+Representative confirmed values:
 
 ```text
-vl_test_ok=1
-tim1_register_ok=1
-af_ok=1
-vl_only_active=1
-tim1_counting=1
-tim1_ccer=80
-tim1_ccer_expected=1
-tim1_moe=1
-forced_modes_ok=1
-
-UH_pin=0
-UL_pin=0
-VH_pin=0
-VL_pin=1
-WH_pin=0
-WL_pin=0
+UH only: tim1_ccer=1    UH=1 UL=0 VH=0 VL=0 WH=0 WL=0
+VH only: tim1_ccer=16   UH=0 UL=0 VH=1 VL=0 WH=0 WL=0
+WH only: tim1_ccer=256  UH=0 UL=0 VH=0 VL=0 WH=1 WL=0
 ```
 
-External VBUS test:
-
-```text
-Motor disconnected.
-Bench supply applied.
-No meaningful supply current draw.
-Board stayed cold.
-```
-
----
-
-### v0.2.8 WL low-side only
-
-Confirmed:
-
-```text
-wl_test_ok=1
-tim1_register_ok=1
-af_ok=1
-wl_only_active=1
-tim1_counting=1
-tim1_ccer=1280
-tim1_ccer_expected=1
-tim1_moe=1
-forced_modes_ok=1
-
-UH_pin=0
-UL_pin=0
-VH_pin=0
-VL_pin=0
-WH_pin=0
-WL_pin=1
-```
-
-External VBUS test:
-
-```text
-Motor disconnected.
-Bench supply tested up to 12 V.
-No bench supply load observed.
-Board stayed cold to the touch.
-```
-
----
-
-## High-side input-command tests
-
-These tests deliberately commanded one high-side gate-driver input high at a time.
-
-Important limitation:
-
-```text
-Confirmed: STM32/TIM1 to gate-driver input command path.
-Not directly confirmed: actual high-side MOSFET gate voltage, bootstrap voltage, or switching waveform.
-```
-
-No motor was connected for any of these tests.
-
-The high-side tests are useful because they verify the command path and pin mapping without intentionally creating a VBUS-to-ground current path.
-
----
-
-### v0.2.9 UH high-side command only
-
-Confirmed:
-
-```text
-uh_test_ok=1
-tim1_register_ok=1
-af_ok=1
-uh_only_active=1
-tim1_counting=1
-tim1_ccer=1
-tim1_ccer_expected=1
-tim1_moe=1
-forced_modes_ok=1
-
-UH_pin=1
-UL_pin=0
-VH_pin=0
-VL_pin=0
-WH_pin=0
-WL_pin=0
-```
-
-External VBUS test:
-
-```text
-Motor disconnected.
-Bench supply applied.
-No meaningful supply current draw.
-Board stayed cool.
-```
-
----
-
-### v0.2.10 VH high-side command only
-
-Confirmed:
-
-```text
-vh_test_ok=1
-tim1_register_ok=1
-af_ok=1
-vh_only_active=1
-tim1_counting=1
-tim1_ccer=16
-tim1_ccer_expected=1
-tim1_moe=1
-forced_modes_ok=1
-
-UH_pin=0
-UL_pin=0
-VH_pin=1
-VL_pin=0
-WH_pin=0
-WL_pin=0
-```
-
-External VBUS test:
-
-```text
-Motor disconnected.
-Bench supply applied.
-No meaningful supply current draw.
-Board stayed cool.
-```
-
----
-
-### v0.2.11 WH high-side command only
-
-Current confirmed version:
-
-```text
-v0.2.11-single-high-side-wh-command
-```
-
-Confirmed:
-
-```text
-wh_test_ok=1
-tim1_register_ok=1
-af_ok=1
-wh_only_active=1
-tim1_counting=1
-tim1_ccer=256
-tim1_ccer_expected=1
-tim1_moe=1
-forced_modes_ok=1
-
-UH_pin=0
-UL_pin=0
-VH_pin=0
-VL_pin=0
-WH_pin=1
-WL_pin=0
-```
-
-External VBUS test:
-
-```text
-Motor disconnected.
-Bench supply applied.
-No meaningful supply current draw was expected.
-No unexpected pin state was observed.
-Board stayed cool.
-```
-
----
-
-## Current confirmed milestone
-
-All six individual command paths have now been tested one at a time:
-
-```text
-UL low-side command path works.
-VL low-side command path works.
-WL low-side command path works.
-
-UH high-side input command path works.
-VH high-side input command path works.
-WH high-side input command path works.
-```
-
-More precise interpretation:
+Precise interpretation:
 
 ```text
 Confirmed:
@@ -580,153 +198,303 @@ Confirmed:
 - TIM1 alternate-function routing is working.
 - Each intended gate-driver input can be commanded individually.
 - Non-target drive inputs stay low during each single-output test.
-- External VBUS testing caused no unexpected current draw.
-- Board stayed cool during these no-motor tests.
+- External VBUS caused no unexpected current draw during no-motor testing.
+- Board stayed cool.
 
-Not yet directly confirmed:
-- Actual MOSFET gate voltage.
-- Actual MOSFET drain/source conduction.
-- Bootstrap capacitor behavior.
-- Real switching waveform.
-- Motor phase output behavior under load.
+Not directly confirmed:
+- actual MOSFET gate voltage
+- actual MOSFET switching waveform
+- bootstrap capacitor voltage
 ```
 
 ---
 
-## Why outputs are tested one at a time
+## Bootstrap-aware no-motor pulse tests
 
-The one-at-a-time method reduces risk and helps catch errors before motor-connected testing.
+### v0.2.12 U-phase bootstrap-aware pulse
 
-It helps verify:
+Confirmed no-motor U-phase sequence:
 
 ```text
-wrong pin mapping
-wrong alternate-function selection
-wrong TIM1 channel selection
-wrong polarity
-unexpected complementary output
-unexpected two-FET activation in one phase
-shoot-through risk
-unexpected current draw under VBUS
-heat or bad board behavior
+all_off_before          UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+u_bootstrap_charge_ul   UH=0 UL=1 VH=0 VL=0 WH=0 WL=0
+deadtime_after_ul       UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+u_highside_command_uh   UH=1 UL=0 VH=0 VL=0 WH=0 WL=0
+all_off_cooldown        UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
 ```
 
-With only one driver input active and no motor connected, there is no intended current path from VBUS to ground.
-
----
-
-## Current safety rule
-
-Do not connect a motor for the current firmware versions.
-
-Current tests only validate one command path at a time:
+Confirmed fields:
 
 ```text
-One driver input active.
-All other driver inputs inactive.
-No PWM duty.
-No commutation.
-No motor.
-No intentional load path.
+state_ok=1
+af_ok=1
+pins_ok=1
+no_u_overlap=1
+tim1_ok=1
+cycle_ok=1
 ```
 
----
+### v0.2.13 all-phases bootstrap-aware pulse
 
-## Next research topic
-
-Before writing the next firmware step, research and review the L6387 high-side bootstrap behavior.
-
-Specific items to research:
+Confirmed no-motor U/V/W sequence:
 
 ```text
-L6387 bootstrap capacitor charging path.
-Minimum low-side on-time needed to charge bootstrap.
-Bootstrap diode behavior.
-High-side UVLO behavior.
-How long the high-side can stay on from bootstrap charge.
-Recommended bootstrap capacitor sizing.
-Dead-time requirements.
-Safe startup state.
-Safe pulse sequencing.
-How to avoid high-side/low-side shoot-through.
+UL charge -> all off -> UH command -> all off
+VL charge -> all off -> VH command -> all off
+WL charge -> all off -> WH command -> all off
 ```
 
-Board-specific schematic items to review:
+Confirmed fields:
 
 ```text
-bootstrap capacitors on each L6387 driver
-bootstrap diodes
-gate resistors
-phase output nodes
-shunt/current monitor path
-VBUS divider
-current feedback op-amp outputs
+state_ok=1
+af_ok=1
+pins_ok=1
+no_phase_overlap=1
+active_count_ok=1
+tim1_ok=1
+cycle_ok=1
+```
+
+External VBUS test:
+
+```text
+Motor disconnected.
+Bench supply tested up to 12 V.
+No unexpected current draw.
+Board stayed cold.
+VBUS ADC tracked the applied supply.
 ```
 
 ---
 
-## Next likely firmware step
+## First motor-connected twitch test
 
-Recommended next firmware step:
+### v0.2.14 button-gated U->V twitch prep
 
-```text
-v0.2.12 bootstrap-aware single-phase pulse prep
-```
-
-Likely test concept, still motor disconnected:
+Current confirmed version:
 
 ```text
-1. Start all outputs safe/inactive.
-2. Briefly command the matching low-side input to create a bootstrap charge opportunity.
-3. Turn all outputs off.
-4. Briefly command the matching high-side input.
-5. Return all outputs off.
-6. Repeat slowly.
-7. Keep detailed logs of requested state, register state, pin readback, VBUS, temperature, and current-monitor raw ADC values.
+v0.2.14-button-gated-u-twitch-prep
 ```
 
-Initial target phase:
+Firmware behavior:
 
 ```text
-U phase:
-UL bootstrap-charge pulse
-all off
-UH command pulse
-all off
-repeat slowly
+Default state: all outputs off.
+Button press runs one short twitch sequence.
+After twitch: all outputs off.
+Waits for button release before allowing the next twitch.
 ```
 
-Safety constraints for this next step:
+Button press sequence:
 
 ```text
-No motor.
-Current-limited bench supply.
-Start around 5 V.
-Low current limit.
-Stop immediately if current rises unexpectedly.
-Stop immediately if anything warms up.
-Avoid simultaneous UH and UL.
-Avoid enabling any other phase.
+idle_all_off            UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+u_bootstrap_charge_ul   UH=0 UL=1 VH=0 VL=0 WH=0 WL=0
+deadtime_after_ul       UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+twitch_drive_uh_vl      UH=1 UL=0 VH=0 VL=1 WH=0 WL=0
+all_off_after_twitch    UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+wait_button_release     UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
 ```
 
-The goal of the next firmware is still not motor spin. The goal is to prepare a controlled bootstrap-aware pulse pattern and watch for safe board behavior.
+No-motor test confirmed:
+
+```text
+button trigger works
+UL bootstrap-charge step works
+all-off deadtime works
+UH + VL phase-pair command works
+no same-phase overlap
+returns to all-off
+twitch_summary cycle_ok=1
+```
+
+Motor-connected test conditions:
+
+```text
+Small 2212 motor
+No prop
+Bench supply around 8 V
+Current-limited supply
+Button-gated single pulse
+No continuous commutation
+```
+
+Observed result:
+
+```text
+Each button press produced a small physical twitch/jump.
+No continuous spin was attempted.
+Board stayed cool.
+No abnormal behavior reported.
+```
+
+Representative successful log fields:
+
+```text
+state=twitch_drive_uh_vl
+state_ok=1
+pins_ok=1
+no_phase_overlap=1
+active_count=2
+active_count_ok=1
+tim1_ok=1
+expected_ccer=81
+tim1_ccer=81
+
+UH=1
+UL=0
+VH=0
+VL=1
+WH=0
+WL=0
+```
+
+Returned safely to all-off:
+
+```text
+state=all_off_after_twitch
+state_ok=1
+active_count=0
+
+UH=0
+UL=0
+VH=0
+VL=0
+WH=0
+WL=0
+```
+
+Summary field:
+
+```text
+twitch_summary cycle_ok=1 twitch_vector=UH_plus_VL
+```
+
+VBUS ADC behavior:
+
+```text
+VBUS raw increased with the bench supply.
+Example during 8 V test: vbus_raw around 965, vbus_delta around 390.
+```
+
+Current-monitor behavior:
+
+```text
+Current-monitor raw values moved during/after the twitch, especially OP2.
+This is consistent with a real motor-current event, but it is still raw ADC data and not calibrated current.
+```
 
 ---
 
-## Future steps after bootstrap-aware testing
-
-Possible later sequence:
+## Current status
 
 ```text
-1. Bootstrap-aware U phase pulse test, no motor.
-2. Repeat for V phase, no motor.
-3. Repeat for W phase, no motor.
-4. Review whether a scope or meter is available for gate/phase verification.
-5. Create very low-duty open-loop six-step commutation firmware.
-6. Connect small BLDC motor with no prop.
-7. Use low VBUS and strict current limit.
-8. Attempt first brief motor twitch.
-9. Only later attempt slow controlled spin.
+First motor-connected button-gated twitch succeeded.
+Firmware returns to all-off after each twitch.
+No prop was used.
+No continuous commutation was attempted.
+```
+
+This is a major milestone. The project has moved from static command-path proof to real motor actuation.
+
+---
+
+## What is still not confirmed
+
+```text
+actual MOSFET gate voltage
+actual high-side bootstrap voltage
+phase-node switching waveform
+calibrated motor current
+dead-time margin under real PWM
+continuous commutation stability
+motor startup reliability
+thermal behavior under repeated/longer drive
+```
+
+A scope or meter would be useful before aggressive PWM or longer spin tests.
+
+---
+
+## Recommended next step
+
+Do not jump straight to continuous spin.
+
+Recommended next step:
+
+```text
+v0.2.15 selectable twitch vectors
+```
+
+Purpose:
+
+```text
+Test all six valid six-step phase-pair vectors one at a time, button gated.
+```
+
+Valid vectors:
+
+```text
+UH + VL
+UH + WL
+VH + WL
+VH + UL
+WH + UL
+WH + VL
+```
+
+Recommended behavior:
+
+```text
+Default all-off idle.
+One button press advances to the next vector.
+Each press performs:
+  bootstrap charge for the target high-side phase
+  all-off deadtime
+  one short phase-pair twitch pulse
+  all-off
+  wait for button release
+Log vector name, pins, TIM1 registers, VBUS, temp, and current-monitor raw values.
+```
+
+Test plan:
+
+```text
+1. Test v0.2.15 with no motor first.
+2. Confirm each vector logs state_ok=1, pins_ok=1, no_phase_overlap=1.
+3. Connect motor with no prop.
+4. Use low voltage and strict current limit.
+5. Button-test each vector one at a time.
+6. Expect different tiny twitch directions/positions.
+7. Stop if current jumps, board warms, motor locks hard, or logs show any failed state.
+```
+
+After selectable vector testing passes, the next later step can be very slow open-loop six-step commutation.
+
+---
+
+## Future path
+
+Likely sequence:
+
+```text
+v0.2.15 selectable twitch vectors
+v0.2.16 very slow open-loop six-step stepping, button gated
+v0.2.17 low-duty timed stepping with adjustable delay
+v0.2.18 cautious first slow spin attempt
+```
+
+Each stage should keep:
+
+```text
+no prop
+low voltage
+strict current limit
+short test duration
+automatic all-off fallback
+clear RTT logs
 ```
 
 ---
@@ -736,29 +504,31 @@ Possible later sequence:
 Use version tags matching the tested firmware milestone, for example:
 
 ```text
-v0.2.11-single-high-side-wh-command
+v0.2.14-button-gated-u-twitch-prep
 ```
 
 ---
 
-## Status
+## Status summary
 
-Current status:
+Current passed milestones:
 
 ```text
-v0.2.6-fix2 UL low-side passed.
-v0.2.7 VL low-side passed.
-v0.2.8 WL low-side passed.
+v0.2.6-fix2 UL low-side passed
+v0.2.7 VL low-side passed
+v0.2.8 WL low-side passed
 
-v0.2.9 UH high-side input-command passed.
-v0.2.10 VH high-side input-command passed.
-v0.2.11 WH high-side input-command passed.
+v0.2.9 UH high-side input-command passed
+v0.2.10 VH high-side input-command passed
+v0.2.11 WH high-side input-command passed
 
-Ready to commit the six individual command-path milestone.
-Next: research L6387 bootstrap behavior before writing bootstrap-aware pulse firmware.
+v0.2.12 U-phase bootstrap-aware no-motor pulse passed
+v0.2.13 all-phases bootstrap-aware no-motor pulse passed
+
+v0.2.14 button-gated UH+VL first motor twitch passed
 ```
 
 ---
 
 Created: 2026-06-07
-Updated milestone: v0.2.11-single-high-side-wh-command
+Updated milestone: v0.2.14-button-gated-u-twitch-prep
