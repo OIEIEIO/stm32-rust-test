@@ -1,8 +1,8 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.2.3-fix1-tim1-ccer-enabled-moe-off
-// Purpose: STM32G431CB Rust bring-up: TIM1 AF drive pins with CCER enabled but BDTR.MOE kept OFF
+// Version: v0.2.4-tim1-moe-on-ccer-off
+// Purpose: STM32G431CB Rust bring-up: enable TIM1 MOE while keeping CCER outputs disabled
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 // ================================================================
 
@@ -102,17 +102,8 @@ const TIM1_CR1_ARPE: u32 = 1 << 7;
 const TIM1_EGR_UG: u32 = 1 << 0;
 
 const TIM1_BDTR_OSSI: u32 = 1 << 10;
+const TIM1_BDTR_OSSR: u32 = 1 << 11;
 const TIM1_BDTR_MOE: u32 = 1 << 15;
-
-// CCER enable bits only. Polarity bits remain zero, active-high.
-// Decimal expected value: 1365.
-const TIM1_CCER_SAFE_ENABLED_MOE_OFF: u32 =
-    (1 << 0) |  // CC1E
-    (1 << 2) |  // CC1NE
-    (1 << 4) |  // CC2E
-    (1 << 6) |  // CC2NE
-    (1 << 8) |  // CC3E
-    (1 << 10);  // CC3NE
 
 const TIM1_TEST_PSC: u32 = 0;
 const TIM1_TEST_ARR: u32 = 3999;
@@ -169,36 +160,33 @@ const ADC_CR_ADCAL: u32 = 1 << 31;
 // Board pins
 // ------------------------------------------------------------
 
-const STATUS_LED_PIN: u32 = 6;   // PC6
-const USER_BUTTON_PIN: u32 = 10; // PC10
+const STATUS_LED_PIN: u32 = 6;
+const USER_BUTTON_PIN: u32 = 10;
 
-const VBUS_PIN: u32 = 0;    // PA0
-const OP1_OUT_PIN: u32 = 2; // PA2
-const OP2_OUT_PIN: u32 = 6; // PA6
+const VBUS_PIN: u32 = 0;
+const OP1_OUT_PIN: u32 = 2;
+const OP2_OUT_PIN: u32 = 6;
 
-const OP3_OUT_PIN: u32 = 1; // PB1
-const POT_PIN: u32 = 12;    // PB12
-const TEMP_PIN: u32 = 14;   // PB14
+const OP3_OUT_PIN: u32 = 1;
+const POT_PIN: u32 = 12;
+const TEMP_PIN: u32 = 14;
 
-// L6387 drive input pins.
-const DRIVE_UH_PIN: u32 = 8;  // PA8  / TIM1_CH1  / UH
-const DRIVE_VH_PIN: u32 = 9;  // PA9  / TIM1_CH2  / VH
-const DRIVE_WH_PIN: u32 = 10; // PA10 / TIM1_CH3  / WH
-const DRIVE_VL_PIN: u32 = 12; // PA12 / TIM1_CH2N / VL
-const DRIVE_WL_PIN: u32 = 15; // PB15 / TIM1_CH3N / WL
-const DRIVE_UL_PIN: u32 = 13; // PC13 / TIM1_CH1N / UL
+const DRIVE_UH_PIN: u32 = 8;
+const DRIVE_VH_PIN: u32 = 9;
+const DRIVE_WH_PIN: u32 = 10;
+const DRIVE_VL_PIN: u32 = 12;
+const DRIVE_WL_PIN: u32 = 15;
+const DRIVE_UL_PIN: u32 = 13;
 
-// TIM1 alternate-function numbers.
-const AF_TIM1_PA: u32 = 6; // PA8/PA9/PA10/PA12
-const AF_TIM1_N: u32 = 4;  // PB15/PC13
+const AF_TIM1_PA: u32 = 6;
+const AF_TIM1_N: u32 = 4;
 
-// ADC channels.
-const VBUS_ADC_CHANNEL: u32 = 1;     // PA0  / ADC1_IN1
-const OP1_OUT_ADC_CHANNEL: u32 = 3;  // PA2  / ADC1_IN3
-const OP2_OUT_ADC_CHANNEL: u32 = 3;  // PA6  / ADC2_IN3
-const OP3_OUT_ADC_CHANNEL: u32 = 12; // PB1  / ADC1_IN12
-const TEMP_ADC_CHANNEL: u32 = 5;     // PB14 / ADC1_IN5
-const POT_ADC_CHANNEL: u32 = 11;     // PB12 / ADC1_IN11
+const VBUS_ADC_CHANNEL: u32 = 1;
+const OP1_OUT_ADC_CHANNEL: u32 = 3;
+const OP2_OUT_ADC_CHANNEL: u32 = 3;
+const OP3_OUT_ADC_CHANNEL: u32 = 12;
+const TEMP_ADC_CHANNEL: u32 = 5;
+const POT_ADC_CHANNEL: u32 = 11;
 
 const ADC_TIMEOUT_VALUE: u16 = 0xFFFF;
 
@@ -247,7 +235,7 @@ struct Tim1Readback {
     cr2: u32,
     moe: u32,
     ossi: u32,
-    ccer_expected: u32,
+    ossr: u32,
     safety_ok: u32,
 }
 
@@ -387,21 +375,18 @@ fn read_drive_af() -> DriveAfReadback {
         vl_pin,
         wh_pin,
         wl_pin,
-
         uh_mode,
         ul_mode,
         vh_mode,
         vl_mode,
         wh_mode,
         wl_mode,
-
         uh_af,
         ul_af,
         vh_af,
         vl_af,
         wh_af,
         wl_af,
-
         af_ok,
     }
 }
@@ -422,19 +407,20 @@ fn delay_fast_button() {
 // TIM1 helpers
 // ------------------------------------------------------------
 
-fn enforce_tim1_ccer_enabled_moe_off() {
+fn enforce_tim1_moe_on_ccer_off() {
     unsafe {
-        // No duty yet.
         write_volatile(TIM1_CCR1, 0);
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
-        // Enable CC outputs internally, but keep the advanced-timer master gate OFF.
-        write_volatile(TIM1_CCER, TIM1_CCER_SAFE_ENABLED_MOE_OFF);
+        // Key safety point for this version:
+        // MOE is ON, but CCER remains OFF.
+        write_volatile(TIM1_CCER, 0);
 
         let mut bdtr = read_volatile(TIM1_BDTR);
-        bdtr &= !TIM1_BDTR_MOE;
+        bdtr |= TIM1_BDTR_MOE;
         bdtr |= TIM1_BDTR_OSSI;
+        bdtr |= TIM1_BDTR_OSSR;
         write_volatile(TIM1_BDTR, bdtr);
     }
 }
@@ -457,26 +443,15 @@ fn read_tim1() -> Tim1Readback {
         let counting = if cnt_a != cnt_b { 1 } else { 0 };
         let moe = if (bdtr & TIM1_BDTR_MOE) != 0 { 1 } else { 0 };
         let ossi = if (bdtr & TIM1_BDTR_OSSI) != 0 { 1 } else { 0 };
+        let ossr = if (bdtr & TIM1_BDTR_OSSR) != 0 { 1 } else { 0 };
 
-        let ccer_expected = if ccer == TIM1_CCER_SAFE_ENABLED_MOE_OFF {
-            1
-        } else {
-            0
-        };
-
-        // Safety definition for this step:
-        // - TIM1 is counting.
-        // - CCER has channel output enables set.
-        // - MOE remains OFF.
-        // - CCRs remain zero.
-        // - OSSI is set for defined idle state while MOE is off.
-        // - CR2 idle state bits remain zero.
         let idle_bits = (cr2 >> 8) & 0b11_1111;
 
         let safety_ok = if counting == 1
-            && ccer_expected == 1
-            && moe == 0
+            && ccer == 0
+            && moe == 1
             && ossi == 1
+            && ossr == 1
             && idle_bits == 0
             && ccr1 == 0
             && ccr2 == 0
@@ -501,63 +476,47 @@ fn read_tim1() -> Tim1Readback {
             cr2,
             moe,
             ossi,
-            ccer_expected,
+            ossr,
             safety_ok,
         }
     }
 }
 
-fn setup_tim1_ccer_enabled_moe_off() {
+fn setup_tim1_moe_on_ccer_off() {
     unsafe {
         let apb2enr = read_volatile(RCC_APB2ENR);
         write_volatile(RCC_APB2ENR, apb2enr | RCC_APB2ENR_TIM1EN);
 
         asm::delay(8_000);
 
-        // Stop timer while configuring.
         write_volatile(TIM1_CR1, 0);
-
-        // Start from fully disabled output state.
         write_volatile(TIM1_CCER, 0);
 
-        // CR2 idle states: OIS1/OIS1N/OIS2/OIS2N/OIS3/OIS3N = 0.
-        // This requests LOW idle state for all six outputs.
         let mut cr2 = read_volatile(TIM1_CR2);
         cr2 &= !(0b11_1111 << 8);
         write_volatile(TIM1_CR2, cr2);
-
-        // MOE remains OFF.
-        // OSSI ON gives a defined idle state while MOE is off.
-        let mut bdtr = read_volatile(TIM1_BDTR);
-        bdtr &= !TIM1_BDTR_MOE;
-        bdtr |= TIM1_BDTR_OSSI;
-        write_volatile(TIM1_BDTR, bdtr);
 
         write_volatile(TIM1_PSC, TIM1_TEST_PSC);
         write_volatile(TIM1_ARR, TIM1_TEST_ARR);
         write_volatile(TIM1_RCR, 0);
 
-        // No duty yet.
         write_volatile(TIM1_CCR1, 0);
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
         // PWM mode 1 internally for CH1/CH2/CH3, preload enabled.
+        // CCER remains 0, so this does not intentionally enable pin output.
         let ccmr1 = (0b110 << 4) | (1 << 3) | (0b110 << 12) | (1 << 11);
         let ccmr2 = (0b110 << 4) | (1 << 3);
 
         write_volatile(TIM1_CCMR1, ccmr1);
         write_volatile(TIM1_CCMR2, ccmr2);
 
-        // Update event to load registers.
         write_volatile(TIM1_EGR, TIM1_EGR_UG);
 
-        enforce_tim1_ccer_enabled_moe_off();
-
-        // Start counter.
         write_volatile(TIM1_CR1, TIM1_CR1_ARPE | TIM1_CR1_CEN);
 
-        enforce_tim1_ccer_enabled_moe_off();
+        enforce_tim1_moe_on_ccer_off();
     }
 }
 
@@ -732,16 +691,20 @@ fn setup_gpio_base() {
 
 fn setup_drive_pins_tim1_af() {
     unsafe {
-        // Make sure TIM1 is safe before switching pins to AF.
+        // Keep CC outputs disabled while assigning AF pins.
         write_volatile(TIM1_CCER, 0);
-        write_volatile(TIM1_BDTR, (read_volatile(TIM1_BDTR) & !TIM1_BDTR_MOE) | TIM1_BDTR_OSSI);
+
+        let mut bdtr = read_volatile(TIM1_BDTR);
+        bdtr &= !TIM1_BDTR_MOE;
+        bdtr |= TIM1_BDTR_OSSI | TIM1_BDTR_OSSR;
+        write_volatile(TIM1_BDTR, bdtr);
+
         write_volatile(TIM1_CCR1, 0);
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
 
         force_drive_output_latches_low();
 
-        // GPIOA TIM1 AF pins: PA8/PA9/PA10/PA12 = AF6.
         set_pin_af(GPIOA_AFRL, GPIOA_AFRH, DRIVE_UH_PIN, AF_TIM1_PA);
         set_pin_af(GPIOA_AFRL, GPIOA_AFRH, DRIVE_VH_PIN, AF_TIM1_PA);
         set_pin_af(GPIOA_AFRL, GPIOA_AFRH, DRIVE_WH_PIN, AF_TIM1_PA);
@@ -773,7 +736,6 @@ fn setup_drive_pins_tim1_af() {
         gpioa_ospeedr &= !(0b11 << (DRIVE_VL_PIN * 2));
         write_volatile(GPIOA_OSPEEDR, gpioa_ospeedr);
 
-        // GPIOB TIM1 AF pin: PB15 = AF4.
         set_pin_af(GPIOB_AFRL, GPIOB_AFRH, DRIVE_WL_PIN, AF_TIM1_N);
         set_pin_mode(GPIOB_MODER, DRIVE_WL_PIN, 0b10);
 
@@ -789,7 +751,6 @@ fn setup_drive_pins_tim1_af() {
         gpiob_ospeedr &= !(0b11 << (DRIVE_WL_PIN * 2));
         write_volatile(GPIOB_OSPEEDR, gpiob_ospeedr);
 
-        // GPIOC TIM1 AF pin: PC13 = AF4.
         set_pin_af(GPIOC_AFRL, GPIOC_AFRH, DRIVE_UL_PIN, AF_TIM1_N);
         set_pin_mode(GPIOC_MODER, DRIVE_UL_PIN, 0b10);
 
@@ -804,11 +765,6 @@ fn setup_drive_pins_tim1_af() {
         let mut gpioc_ospeedr = read_volatile(GPIOC_OSPEEDR);
         gpioc_ospeedr &= !(0b11 << (DRIVE_UL_PIN * 2));
         write_volatile(GPIOC_OSPEEDR, gpioc_ospeedr);
-
-        // FIX1:
-        // The original v0.2.3 cleared CCER here and left it cleared.
-        // This corrected version re-applies the intended TIM1 state after AF setup.
-        enforce_tim1_ccer_enabled_moe_off();
     }
 }
 
@@ -913,11 +869,10 @@ fn main() -> ! {
     rtt_init_print!();
 
     setup_gpio_base();
-    setup_tim1_ccer_enabled_moe_off();
+    setup_tim1_moe_on_ccer_off();
     setup_drive_pins_tim1_af();
 
-    // Final safety enforcement after all pin/timer setup.
-    enforce_tim1_ccer_enabled_moe_off();
+    enforce_tim1_moe_on_ccer_off();
 
     let (adc1_setup_status, adc2_setup_status) = setup_adc_for_board_monitor();
 
@@ -933,10 +888,9 @@ fn main() -> ! {
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.2.3-fix1-tim1-ccer-enabled-moe-off");
+    rprintln!("Version: v0.2.4-tim1-moe-on-ccer-off");
     rprintln!("Drive pins are TIM1 alternate function.");
-    rprintln!("CCER enables CH1/1N/2/2N/3/3N, but BDTR.MOE remains 0.");
-    rprintln!("CCR1/2/3 remain 0. Idle state bits remain 0. OSSI is set.");
+    rprintln!("TIM1 MOE is ON, but CCER is OFF.");
     rprintln!("No intentional gate switching in this version.");
     rprintln!("ADC1 setup status: {}", adc1_setup_status);
     rprintln!("ADC2 setup status: {}", adc2_setup_status);
@@ -965,7 +919,7 @@ fn main() -> ! {
     );
 
     rprintln!(
-        "tim1_startup: safety_ok={} counting={} cnt_a={} cnt_b={} psc={} arr={} ccr1={} ccr2={} ccr3={} ccer={} ccer_expected={} bdtr={} cr2={} moe={} ossi={}",
+        "tim1_startup: safety_ok={} counting={} cnt_a={} cnt_b={} psc={} arr={} ccr1={} ccr2={} ccr3={} ccer={} bdtr={} cr2={} moe={} ossi={} ossr={}",
         tim1_startup.safety_ok,
         tim1_startup.counting,
         tim1_startup.cnt_a,
@@ -976,11 +930,11 @@ fn main() -> ! {
         tim1_startup.ccr2,
         tim1_startup.ccr3,
         tim1_startup.ccer,
-        tim1_startup.ccer_expected,
         tim1_startup.bdtr,
         tim1_startup.cr2,
         tim1_startup.moe,
-        tim1_startup.ossi
+        tim1_startup.ossi,
+        tim1_startup.ossr
     );
 
     rprintln!("temp_startup_raw: {}", temp_startup_raw);
@@ -989,14 +943,13 @@ fn main() -> ! {
     rprintln!("op2_startup_raw: {}", op2_startup_raw);
     rprintln!("op3_startup_raw: {}", op3_startup_raw);
     rprintln!("Output format:");
-    rprintln!("button=<0/1> safety_ok=<0/1> af_ok=<0/1> tim1_counting=<0/1> tim1_ccer=<raw> tim1_moe=<0/1> tim1_ossi=<0/1> UH_pin=<0/1> UL_pin=<0/1> VH_pin=<0/1> VL_pin=<0/1> WH_pin=<0/1> WL_pin=<0/1> pot_raw=<raw> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> timeout=<0/1>");
+    rprintln!("button=<0/1> safety_ok=<0/1> af_ok=<0/1> tim1_counting=<0/1> tim1_ccer=<raw> tim1_moe=<0/1> tim1_ossi=<0/1> tim1_ossr=<0/1> pot_raw=<raw> temp_raw=<raw> vbus_raw=<raw> op1_raw=<raw> op2_raw=<raw> op3_raw=<raw> timeout=<0/1>");
     rprintln!("================================================");
 
     led_low();
 
     loop {
-        // Keep the intended safety state latched while monitoring.
-        enforce_tim1_ccer_enabled_moe_off();
+        enforce_tim1_moe_on_ccer_off();
 
         let drive = read_drive_af();
         let tim1 = read_tim1();
@@ -1043,7 +996,7 @@ fn main() -> ! {
 
         if button_pressed() {
             rprintln!(
-                "button=1 safety_ok={} af_ok={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_moe={} tim1_ossi={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} UH_af={} UL_af={} VH_af={} VL_af={} WH_af={} WL_af={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
+                "button=1 safety_ok={} af_ok={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_bdtr={} tim1_cr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=button_fast",
                 tim1.safety_ok,
                 drive.af_ok,
                 tim1.counting,
@@ -1054,23 +1007,17 @@ fn main() -> ! {
                 tim1.ccr2,
                 tim1.ccr3,
                 tim1.ccer,
-                tim1.ccer_expected,
                 tim1.bdtr,
                 tim1.cr2,
                 tim1.moe,
                 tim1.ossi,
+                tim1.ossr,
                 drive.uh_pin,
                 drive.ul_pin,
                 drive.vh_pin,
                 drive.vl_pin,
                 drive.wh_pin,
                 drive.wl_pin,
-                drive.uh_af,
-                drive.ul_af,
-                drive.vh_af,
-                drive.vl_af,
-                drive.wh_af,
-                drive.wl_af,
                 live_pot_raw,
                 pot_pct,
                 live_temp_raw,
@@ -1090,7 +1037,7 @@ fn main() -> ! {
             blink_fast_button_override();
         } else {
             rprintln!(
-                "button=0 safety_ok={} af_ok={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_ccer_expected={} tim1_bdtr={} tim1_cr2={} tim1_moe={} tim1_ossi={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} UH_af={} UL_af={} VH_af={} VL_af={} WH_af={} WL_af={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
+                "button=0 safety_ok={} af_ok={} tim1_counting={} tim1_cnt_a={} tim1_cnt_b={} tim1_arr={} tim1_ccr1={} tim1_ccr2={} tim1_ccr3={} tim1_ccer={} tim1_bdtr={} tim1_cr2={} tim1_moe={} tim1_ossi={} tim1_ossr={} UH_pin={} UL_pin={} VH_pin={} VL_pin={} WH_pin={} WL_pin={} pot_raw={} pot_pct={} temp_raw={} temp_delta={} vbus_raw={} vbus_delta={} op1_raw={} op1_delta={} op2_raw={} op2_delta={} op3_raw={} op3_delta={} delay_cycles={} timeout={} mode=pot_control",
                 tim1.safety_ok,
                 drive.af_ok,
                 tim1.counting,
@@ -1101,23 +1048,17 @@ fn main() -> ! {
                 tim1.ccr2,
                 tim1.ccr3,
                 tim1.ccer,
-                tim1.ccer_expected,
                 tim1.bdtr,
                 tim1.cr2,
                 tim1.moe,
                 tim1.ossi,
+                tim1.ossr,
                 drive.uh_pin,
                 drive.ul_pin,
                 drive.vh_pin,
                 drive.vl_pin,
                 drive.wh_pin,
                 drive.wl_pin,
-                drive.uh_af,
-                drive.ul_af,
-                drive.vh_af,
-                drive.vl_af,
-                drive.wh_af,
-                drive.wl_af,
                 live_pot_raw,
                 pot_pct,
                 live_temp_raw,
@@ -1142,7 +1083,7 @@ fn main() -> ! {
 // ================================================================
 // Footer
 // File: main.rs
-// Version: v0.2.3-fix1-tim1-ccer-enabled-moe-off
+// Version: v0.2.4-tim1-moe-on-ccer-off
 // Created: 2026-06-07
 // Generated timestamp: 2026-06-07
 // ================================================================
