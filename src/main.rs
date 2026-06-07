@@ -1,8 +1,8 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.1.6-rtt-adc-live-value
-// Purpose: STM32G431CB Rust bring-up: live PB12 potentiometer ADC value over RTT
+// Version: v0.1.7-pb14-temperature-feedback-raw
+// Purpose: STM32G431CB Rust bring-up: live PB12 pot + PB14 temperature feedback raw ADC over RTT
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 // ================================================================
 
@@ -56,6 +56,7 @@ const GPIOC_BSRR: *mut u32 = (GPIOC_BASE + 0x18) as *mut u32;
 const ADC1_ISR: *mut u32 = (ADC1_BASE + 0x00) as *mut u32;
 const ADC1_CR: *mut u32 = (ADC1_BASE + 0x08) as *mut u32;
 const ADC1_CFGR: *mut u32 = (ADC1_BASE + 0x0C) as *mut u32;
+const ADC1_SMPR1: *mut u32 = (ADC1_BASE + 0x14) as *mut u32;
 const ADC1_SMPR2: *mut u32 = (ADC1_BASE + 0x18) as *mut u32;
 const ADC1_SQR1: *mut u32 = (ADC1_BASE + 0x30) as *mut u32;
 const ADC1_DR: *const u32 = (ADC1_BASE + 0x40) as *const u32;
@@ -81,8 +82,12 @@ const ADC_CR_ADCAL: u32 = 1 << 31;
 
 const STATUS_LED_PIN: u32 = 6;   // PC6
 const USER_BUTTON_PIN: u32 = 10; // PC10
+
 const POT_PIN: u32 = 12;         // PB12
-const POT_ADC_CHANNEL: u32 = 11; // ADC1_IN11
+const TEMP_PIN: u32 = 14;        // PB14
+
+const POT_ADC_CHANNEL: u32 = 11;  // ADC1_IN11
+const TEMP_ADC_CHANNEL: u32 = 5;  // ADC1_IN5
 
 const ADC_TIMEOUT_VALUE: u16 = 0xFFFF;
 
@@ -126,8 +131,19 @@ fn delay_fast_button() {
 // ADC helpers
 // ------------------------------------------------------------
 
-fn adc1_read_pot_raw() -> u16 {
+fn adc1_select_channel(channel: u32) {
     unsafe {
+        // Regular sequence length = 1 conversion.
+        // SQ1 = selected channel, bits [10:6].
+        let sqr1 = channel << 6;
+        write_volatile(ADC1_SQR1, sqr1);
+    }
+}
+
+fn adc1_read_channel_raw(channel: u32) -> u16 {
+    unsafe {
+        adc1_select_channel(channel);
+
         // Clear old EOC/EOS flags.
         write_volatile(ADC1_ISR, ADC_ISR_EOC | ADC_ISR_EOS);
 
@@ -154,12 +170,15 @@ fn adc_live_percent(raw: u16) -> u32 {
     ((clamped_raw as u32) * 100) / 4095
 }
 
+fn adc_delta(current: u16, baseline: u16) -> i32 {
+    (current as i32) - (baseline as i32)
+}
+
 fn pot_to_delay(raw: u16) -> u32 {
-    // Pot behavior observed by Jorge:
+    // Pot behavior observed:
     // far right -> low / near zero
     // far left  -> high / near 4095
     //
-    // Mapping:
     // low raw  -> slow blink
     // high raw -> fast blink
     //
@@ -224,24 +243,34 @@ fn setup_gpio() {
         write_volatile(GPIOC_PUPDR, gpioc_pupdr);
 
         // PB12 = analog mode for potentiometer.
+        // PB14 = analog mode for temperature feedback.
         let mut gpiob_moder = read_volatile(GPIOB_MODER);
+
         gpiob_moder &= !(0b11 << (POT_PIN * 2));
         gpiob_moder |= 0b11 << (POT_PIN * 2);
+
+        gpiob_moder &= !(0b11 << (TEMP_PIN * 2));
+        gpiob_moder |= 0b11 << (TEMP_PIN * 2);
+
         write_volatile(GPIOB_MODER, gpiob_moder);
 
-        // PB12 = no pull-up / no pull-down.
+        // PB12/PB14 = no pull-up / no pull-down.
         let mut gpiob_pupdr = read_volatile(GPIOB_PUPDR);
+
         gpiob_pupdr &= !(0b11 << (POT_PIN * 2));
+        gpiob_pupdr &= !(0b11 << (TEMP_PIN * 2));
+
         write_volatile(GPIOB_PUPDR, gpiob_pupdr);
 
-        // PB12 analog switch enable.
+        // PB12/PB14 analog switch enable.
         let mut gpiob_ascr = read_volatile(GPIOB_ASCR);
         gpiob_ascr |= 1 << POT_PIN;
+        gpiob_ascr |= 1 << TEMP_PIN;
         write_volatile(GPIOB_ASCR, gpiob_ascr);
     }
 }
 
-fn setup_adc1_for_pot() -> u32 {
+fn setup_adc1_for_board_monitor() -> u32 {
     let mut status: u32 = 0;
 
     unsafe {
@@ -261,26 +290,32 @@ fn setup_adc1_for_pot() -> u32 {
         // ADC regulator startup delay.
         asm::delay(160_000);
 
-        // Single-ended mode for channel 11.
+        // Single-ended mode for both channels.
         let mut difsel = read_volatile(ADC1_DIFSEL);
         difsel &= !(1 << POT_ADC_CHANNEL);
+        difsel &= !(1 << TEMP_ADC_CHANNEL);
         write_volatile(ADC1_DIFSEL, difsel);
 
         // Default ADC config:
         // single conversion, right-aligned, 12-bit.
         write_volatile(ADC1_CFGR, 0);
 
-        // Long sample time for slow potentiometer input.
-        // SMPR2 channel 11 uses bits [5:3].
+        // Long sample time for PB14 temp channel ADC1_IN5.
+        // SMPR1 channel 5 uses bits [17:15].
+        let mut smpr1 = read_volatile(ADC1_SMPR1);
+        smpr1 &= !(0b111 << (TEMP_ADC_CHANNEL * 3));
+        smpr1 |= 0b111 << (TEMP_ADC_CHANNEL * 3);
+        write_volatile(ADC1_SMPR1, smpr1);
+
+        // Long sample time for PB12 pot channel ADC1_IN11.
+        // SMPR2 channel 11 uses bits [5:3], because channel 10 starts at bit 0.
         let mut smpr2 = read_volatile(ADC1_SMPR2);
-        smpr2 &= !(0b111 << 3);
-        smpr2 |= 0b111 << 3;
+        smpr2 &= !(0b111 << ((POT_ADC_CHANNEL - 10) * 3));
+        smpr2 |= 0b111 << ((POT_ADC_CHANNEL - 10) * 3);
         write_volatile(ADC1_SMPR2, smpr2);
 
-        // Regular sequence length = 1 conversion.
-        // SQ1 = channel 11, bits [10:6].
-        let sqr1 = POT_ADC_CHANNEL << 6;
-        write_volatile(ADC1_SQR1, sqr1);
+        // Default first selected channel.
+        adc1_select_channel(POT_ADC_CHANNEL);
 
         // Calibrate ADC.
         let cr_before_cal = read_volatile(ADC1_CR);
@@ -330,33 +365,49 @@ fn main() -> ! {
     rtt_init_print!();
 
     setup_gpio();
-    let adc_setup_status = setup_adc1_for_pot();
+    let adc_setup_status = setup_adc1_for_board_monitor();
+
+    // Take a startup baseline for the raw temperature feedback.
+    // This is not Celsius. It is only a raw ADC comparison point.
+    let temp_startup_raw = adc1_read_channel_raw(TEMP_ADC_CHANNEL);
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.1.6-rtt-adc-live-value");
+    rprintln!("Version: v0.1.7-pb14-temperature-feedback-raw");
     rprintln!("PC6  = STATUS LED");
     rprintln!("PC10 = button input");
     rprintln!("PB12 = potentiometer / ADC1_IN11");
+    rprintln!("PB14 = temperature feedback / ADC1_IN5");
     rprintln!("ADC setup status: {}", adc_setup_status);
+    rprintln!("temp_startup_raw: {}", temp_startup_raw);
     rprintln!("Output format:");
-    rprintln!("button=<0/1> live_raw=<0..4095> live_pct=<0..100> delay_cycles=<value> timeout=<0/1>");
+    rprintln!("button=<0/1> pot_raw=<0..4095> pot_pct=<0..100> temp_raw=<0..4095> temp_delta=<raw-startup> delay_cycles=<value> timeout=<0/1>");
     rprintln!("================================================");
 
     led_low();
 
     loop {
-        let raw = adc1_read_pot_raw();
-        let timeout = raw == ADC_TIMEOUT_VALUE;
-        let live_raw = if timeout { 2048 } else { raw };
-        let live_pct = adc_live_percent(live_raw);
-        let delay = pot_to_delay(live_raw);
+        let pot_raw = adc1_read_channel_raw(POT_ADC_CHANNEL);
+        let temp_raw = adc1_read_channel_raw(TEMP_ADC_CHANNEL);
+
+        let pot_timeout = pot_raw == ADC_TIMEOUT_VALUE;
+        let temp_timeout = temp_raw == ADC_TIMEOUT_VALUE;
+        let timeout = pot_timeout || temp_timeout;
+
+        let live_pot_raw = if pot_timeout { 2048 } else { pot_raw };
+        let live_temp_raw = if temp_timeout { temp_startup_raw } else { temp_raw };
+
+        let pot_pct = adc_live_percent(live_pot_raw);
+        let temp_delta = adc_delta(live_temp_raw, temp_startup_raw);
+        let delay = pot_to_delay(live_pot_raw);
 
         if button_pressed() {
             rprintln!(
-                "button=1 live_raw={} live_pct={} delay_cycles={} timeout={} mode=button_fast",
-                live_raw,
-                live_pct,
+                "button=1 pot_raw={} pot_pct={} temp_raw={} temp_delta={} delay_cycles={} timeout={} mode=button_fast",
+                live_pot_raw,
+                pot_pct,
+                live_temp_raw,
+                temp_delta,
                 650_000,
                 if timeout { 1 } else { 0 }
             );
@@ -364,9 +415,11 @@ fn main() -> ! {
             blink_fast_button_override();
         } else {
             rprintln!(
-                "button=0 live_raw={} live_pct={} delay_cycles={} timeout={} mode=pot_control",
-                live_raw,
-                live_pct,
+                "button=0 pot_raw={} pot_pct={} temp_raw={} temp_delta={} delay_cycles={} timeout={} mode=pot_control",
+                live_pot_raw,
+                pot_pct,
+                live_temp_raw,
+                temp_delta,
                 delay,
                 if timeout { 1 } else { 0 }
             );
@@ -379,7 +432,7 @@ fn main() -> ! {
 // ================================================================
 // Footer
 // File: main.rs
-// Version: v0.1.6-rtt-adc-live-value
+// Version: v0.1.7-pb14-temperature-feedback-raw
 // Created: 2026-06-07
 // Generated timestamp: 2026-06-07
 // ================================================================
