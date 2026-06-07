@@ -5,10 +5,10 @@ Rust bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431C
 Current confirmed milestone:
 
 ```text
-v0.2.5-fix1-tim1-forced-inactive-all-low
+v0.2.8-single-low-side-wl-on
 ```
 
-This project is currently focused on safe, step-by-step board bring-up before attempting to spin a BLDC motor.
+This project is focused on safe, step-by-step board bring-up before attempting to spin a BLDC motor.
 
 ---
 
@@ -259,7 +259,7 @@ This version was not treated as a passed milestone.
 
 ### v0.2.5-fix1 forced inactive all-low
 
-Current confirmed version:
+Confirmed version:
 
 ```text
 v0.2.5-fix1-tim1-forced-inactive-all-low
@@ -313,33 +313,160 @@ Supply current appeared negligible.
 VBUS ADC responded correctly and returned to USB baseline when supply was lowered/removed.
 ```
 
-Observed VBUS behavior from logs:
+---
+
+## Low-side command-path tests
+
+These tests deliberately commanded one low-side driver input high at a time.
+
+Important limitation:
 
 ```text
-vbus_raw around 1200  -> external VBUS near 10 V
-vbus_raw around 991   -> supply lowered
-vbus_raw around 657   -> supply lowered further
-vbus_raw around 577   -> back near USB baseline
+Confirmed: STM32/TIM1 to gate-driver input command path.
+Not directly confirmed: actual MOSFET gate voltage or switching waveform.
 ```
 
-This is the current safe milestone before any active-output experiment.
+No motor was connected for any of these tests.
+
+---
+
+### v0.2.6-fix2 UL low-side only
+
+Confirmed:
+
+```text
+ul_test_ok=1
+tim1_register_ok=1
+af_ok=1
+ul_only_active=1
+tim1_counting=1
+tim1_ccer=5
+tim1_ccer_expected=1
+tim1_moe=1
+forced_modes_ok=1
+
+UH_pin=0
+UL_pin=1
+VH_pin=0
+VL_pin=0
+WH_pin=0
+WL_pin=0
+```
+
+External VBUS test:
+
+```text
+Motor disconnected.
+Bench supply applied.
+No meaningful supply current draw.
+Board stayed cold.
+```
+
+---
+
+### v0.2.7 VL low-side only
+
+Confirmed:
+
+```text
+vl_test_ok=1
+tim1_register_ok=1
+af_ok=1
+vl_only_active=1
+tim1_counting=1
+tim1_ccer=80
+tim1_ccer_expected=1
+tim1_moe=1
+forced_modes_ok=1
+
+UH_pin=0
+UL_pin=0
+VH_pin=0
+VL_pin=1
+WH_pin=0
+WL_pin=0
+```
+
+External VBUS test:
+
+```text
+Motor disconnected.
+Bench supply applied.
+No meaningful supply current draw.
+Board stayed cold.
+```
+
+---
+
+### v0.2.8 WL low-side only
+
+Current confirmed version:
+
+```text
+v0.2.8-single-low-side-wl-on
+```
+
+Confirmed:
+
+```text
+wl_test_ok=1
+tim1_register_ok=1
+af_ok=1
+wl_only_active=1
+tim1_counting=1
+tim1_ccer=1280
+tim1_ccer_expected=1
+tim1_moe=1
+forced_modes_ok=1
+
+UH_pin=0
+UL_pin=0
+VH_pin=0
+VL_pin=0
+WH_pin=0
+WL_pin=1
+```
+
+External VBUS test:
+
+```text
+Motor disconnected.
+Bench supply tested up to 12 V.
+No bench supply load observed.
+Board stayed cold to the touch.
+```
+
+---
+
+## Current confirmed milestone
+
+```text
+UL low-side command path works.
+VL low-side command path works.
+WL low-side command path works.
+External VBUS tested up to 12 V with motor disconnected.
+No bench supply load observed.
+Board stayed cold.
+No unexpected drive pin state observed.
+```
+
+This is a good milestone before moving toward high-side/bootstrap-aware testing or motor-connected testing.
 
 ---
 
 ## Current safety rule
 
-Do not connect a motor for the current version.
+Do not connect a motor for the current firmware versions.
 
-Current version is only a forced-inactive full-output-path validation:
+The current low-side tests only validate one low-side command path at a time:
 
 ```text
-TIM1 AF pins active
-CCER enabled
-MOE enabled
-forced inactive mode
-all six drive inputs low
-no PWM duty
-no intentional switching
+One low-side driver input active.
+All high-side inputs off.
+Other low-side inputs off.
+No PWM.
+No motor.
+No load path expected.
 ```
 
 ---
@@ -351,15 +478,14 @@ Next step should be discussed before coding.
 Recommended next technical direction:
 
 ```text
-First active-output test with no motor connected.
-Very limited output pattern.
-Current-limited bench supply.
-Likely one low-side output only.
-Telemetry must continue to show VBUS/current monitor behavior.
-Stop on any heat, current jump, unexpected pin state, or unsafe log field.
+High-side path preparation / bootstrap-aware testing.
+Still no motor at first.
+Use current-limited bench supply.
+Avoid simultaneous high-side and low-side conduction.
+Review L6387 bootstrap behavior before commanding high-side outputs.
 ```
 
-A motor spin test comes later.
+A first motor spin test comes later.
 
 ---
 
@@ -368,7 +494,7 @@ A motor spin test comes later.
 Use version tags matching the tested firmware milestone, for example:
 
 ```text
-v0.2.5-fix1-tim1-forced-inactive-all-low
+v0.2.8-single-low-side-wl-on
 ```
 
 ---
@@ -378,7 +504,9 @@ v0.2.5-fix1-tim1-forced-inactive-all-low
 Current status:
 
 ```text
-v0.2.5-fix1 passed on USB-only.
-v0.2.5-fix1 passed with external VBUS up to about 10 V, no motor.
-Ready to commit before moving toward first active-output testing.
+v0.2.6-fix2 UL low-side passed.
+v0.2.7 VL low-side passed.
+v0.2.8 WL low-side passed.
+External VBUS tested up to 12 V with no motor and no load.
+Ready to commit the three-low-side phase-test milestone.
 ```
