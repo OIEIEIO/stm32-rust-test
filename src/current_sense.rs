@@ -1,37 +1,32 @@
 // ================================================================
 // File: current_sense.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/current_sense.rs
-// Version: v0.5.24-warning-cleanup
+// Version: v0.5.25-injected-ab-op2-op3v
 // Purpose: Zero-offset capture, raw OPAMP current-sense observation,
 //          compact TIM1-triggered injected ADC FOC-prep sampling,
-//          OP3/VOPAMP3 regular-ADC diagnostics, and sector-summary
-//          helpers for the B-G431B-ESC1 bring-up firmware.
+//          OP3/VOPAMP3 regular-ADC diagnostics, and injected-channel
+//          A/B diagnostics for the B-G431B-ESC1 bring-up firmware.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 //
-// Change summary vs v0.5.23:
-//   - Removes unused average helper methods and avg_u32() that were left
-//     from earlier sector-summary diagnostic experiments.
-//   - Keeps existing FocSectorSummary fields and update behavior intact.
-//   - No sampling, logging, ADC, TIM1, OPAMP, or drive behavior change.
-//
-// Change summary vs v0.5.22:
-//   - Adds an OP3/VOPAMP3 diagnostic read path using ADC2 channel 18.
-//   - Keeps the default TIM1_CH4 injected pair unchanged: ADC1=OP1
-//     external VOUT and ADC2=OP2 external VOUT.
-//   - Captures a separate VOPAMP3 zero offset and reports separate
-//     diagnostic timeout/valid fields so OP1/OP2 FOC-prep logging is not
-//     broken if the new internal route is wrong.
-//   - Adds optional OP3/VOPAMP3 fields to FocPrepSample and
-//     FocSectorSummary for logging.
-//   - No motor-drive behavior change.
+// Change summary vs v0.5.24:
+//   - Adds injected-channel A/B diagnostic sampling.
+//   - A sample:
+//       ADC1 injected = OP1 external VOUT
+//       ADC2 injected = OP2 external VOUT
+//   - B sample:
+//       ADC1 injected = OP1 external VOUT
+//       ADC2 injected = OP3/VOPAMP3 internal route
+//   - Keeps OP3/VOPAMP3 regular ADC diagnostic read for comparison.
+//   - Keeps motor drive behavior unchanged.
+//   - Keeps TIM1_CH4 center trigger as the injected conversion trigger.
+//   - Still diagnostic only: no phase-current reconstruction, no current
+//     loop, no Clarke/Park, no SVPWM.
 //
 // Learning notes:
-//   - FOC needs current samples tied to a known PWM timing point, not
-//     arbitrary software ADC reads.
-//   - The current injected pair is OP1/OP2 only.
-//   - OP3/VOPAMP3 is currently a regular ADC diagnostic read. It is not
-//     used yet for phase-current reconstruction and does not rename OP1/OP2
-//     to Ia/Ib.
+//   - This stage proves whether ADC2 can be reconfigured from OP2 to
+//     VOPAMP3 and still complete a TIM1_CH4-triggered injected conversion.
+//   - The A/B test runs two center-triggered injected samples per focmap
+//     event. This is intentionally diagnostic and not the final FOC timing.
 // ================================================================
 
 use core::ptr::{read_volatile, write_volatile};
@@ -91,32 +86,83 @@ pub struct CurrentSenseInjectedConfig {
 }
 
 #[derive(Copy, Clone)]
+struct InjectedPairResult {
+    raw1: u16,
+    raw2: u16,
+    cnt_before_arm: u32,
+    cnt_after_read: u32,
+    wait_loops: u32,
+
+    adc1_jeoc: u32,
+    adc1_jeos: u32,
+    adc2_jeoc: u32,
+    adc2_jeos: u32,
+    adc1_isr: u32,
+    adc2_isr: u32,
+    adc1_jsqr: u32,
+    adc2_jsqr: u32,
+
+    timeout: u32,
+    near_high_rail: u32,
+}
+
+#[derive(Copy, Clone)]
 pub struct FocPrepSample {
     pub target_cnt: u32,
-    pub cnt_before_arm: u32,
-    pub cnt_after_read: u32,
-    pub wait_loops: u32,
 
-    pub op1_raw: u16,
-    pub op2_raw: u16,
-    pub op3_vopamp3_raw: u16,
-    pub op1_delta: i32,
-    pub op2_delta: i32,
-    pub op3_vopamp3_delta: i32,
-    pub op_sum2: i32,
-    pub op3_vopamp3_valid: u32,
+    pub a_cnt_before_arm: u32,
+    pub a_cnt_after_read: u32,
+    pub a_wait_loops: u32,
 
-    pub adc1_jeoc: u32,
-    pub adc1_jeos: u32,
-    pub adc2_jeoc: u32,
-    pub adc2_jeos: u32,
-    pub adc1_isr: u32,
-    pub adc2_isr: u32,
-    pub adc1_jsqr: u32,
-    pub adc2_jsqr: u32,
+    pub b_cnt_before_arm: u32,
+    pub b_cnt_after_read: u32,
+    pub b_wait_loops: u32,
 
-    pub timeout: u32,
-    pub near_high_rail: u32,
+    pub op1_a_raw: u16,
+    pub op1_b_raw: u16,
+    pub op2_a_raw: u16,
+    pub op3_vopamp3_injected_raw: u16,
+    pub op3_vopamp3_regular_raw: u16,
+
+    pub op1_a_delta: i32,
+    pub op1_b_delta: i32,
+    pub op2_a_delta: i32,
+    pub op3_vopamp3_injected_delta: i32,
+    pub op3_vopamp3_regular_delta: i32,
+
+    pub op12_sum2: i32,
+    pub op13v_sum2: i32,
+
+    pub op3_vopamp3_injected_valid: u32,
+    pub op3_vopamp3_regular_valid: u32,
+
+    pub a_adc1_jeoc: u32,
+    pub a_adc1_jeos: u32,
+    pub a_adc2_jeoc: u32,
+    pub a_adc2_jeos: u32,
+    pub a_adc1_isr: u32,
+    pub a_adc2_isr: u32,
+    pub a_adc1_jsqr: u32,
+    pub a_adc2_jsqr: u32,
+
+    pub b_adc1_jeoc: u32,
+    pub b_adc1_jeos: u32,
+    pub b_adc2_jeoc: u32,
+    pub b_adc2_jeos: u32,
+    pub b_adc1_isr: u32,
+    pub b_adc2_isr: u32,
+    pub b_adc1_jsqr: u32,
+    pub b_adc2_jsqr: u32,
+
+    pub a_timeout: u32,
+    pub b_timeout: u32,
+    pub a_near_high_rail: u32,
+    pub b_near_high_rail: u32,
+
+    pub ok_a: u32,
+    pub ok_b: u32,
+
+    // Primary compatibility flag for the active OP1/OP2 diagnostic pair.
     pub ok: u32,
 }
 
@@ -137,11 +183,11 @@ pub struct FocSectorSummary {
     pub op2_max: i32,
     pub op2_abs_sum: u32,
 
-    pub op3_vopamp3_samples: u32,
-    pub op3_vopamp3_sum: i32,
-    pub op3_vopamp3_min: i32,
-    pub op3_vopamp3_max: i32,
-    pub op3_vopamp3_abs_sum: u32,
+    pub op3_vopamp3_injected_samples: u32,
+    pub op3_vopamp3_injected_sum: i32,
+    pub op3_vopamp3_injected_min: i32,
+    pub op3_vopamp3_injected_max: i32,
+    pub op3_vopamp3_injected_abs_sum: u32,
 
     pub isum2_sum: i32,
     pub isum2_min: i32,
@@ -167,11 +213,11 @@ impl FocSectorSummary {
             op2_max: 0,
             op2_abs_sum: 0,
 
-            op3_vopamp3_samples: 0,
-            op3_vopamp3_sum: 0,
-            op3_vopamp3_min: 0,
-            op3_vopamp3_max: 0,
-            op3_vopamp3_abs_sum: 0,
+            op3_vopamp3_injected_samples: 0,
+            op3_vopamp3_injected_sum: 0,
+            op3_vopamp3_injected_min: 0,
+            op3_vopamp3_injected_max: 0,
+            op3_vopamp3_injected_abs_sum: 0,
 
             isum2_sum: 0,
             isum2_min: 0,
@@ -192,8 +238,11 @@ impl FocSectorSummary {
         avg_i32(self.isum2_sum, self.ok_samples)
     }
 
-    pub fn op3_vopamp3_avg(&self) -> i32 {
-        avg_i32(self.op3_vopamp3_sum, self.op3_vopamp3_samples)
+    pub fn op3_vopamp3_injected_avg(&self) -> i32 {
+        avg_i32(
+            self.op3_vopamp3_injected_sum,
+            self.op3_vopamp3_injected_samples,
+        )
     }
 }
 
@@ -208,80 +257,80 @@ fn avg_i32(sum: i32, count: u32) -> i32 {
 pub fn update_foc_sector_summary(summary: &mut FocSectorSummary, sample: FocPrepSample) {
     summary.samples = summary.samples.wrapping_add(1);
 
-    if sample.timeout != 0 {
+    if sample.a_timeout != 0 {
         summary.timeout_samples = summary.timeout_samples.wrapping_add(1);
     }
 
-    if sample.near_high_rail != 0 {
+    if sample.a_near_high_rail != 0 {
         summary.rail_samples = summary.rail_samples.wrapping_add(1);
     }
 
-    if sample.ok != 1 {
-        return;
-    }
+    if sample.ok_a == 1 {
+        let first_ok = summary.ok_samples == 0;
+        summary.ok_samples = summary.ok_samples.wrapping_add(1);
 
-    let first_ok = summary.ok_samples == 0;
-    summary.ok_samples = summary.ok_samples.wrapping_add(1);
+        let op1 = sample.op1_a_delta;
+        let op2 = sample.op2_a_delta;
+        let isum2 = sample.op12_sum2;
 
-    let op1 = sample.op1_delta;
-    let op2 = sample.op2_delta;
-    let isum2 = sample.op_sum2;
+        summary.op1_sum = summary.op1_sum.wrapping_add(op1);
+        summary.op2_sum = summary.op2_sum.wrapping_add(op2);
+        summary.isum2_sum = summary.isum2_sum.wrapping_add(isum2);
 
-    summary.op1_sum = summary.op1_sum.wrapping_add(op1);
-    summary.op2_sum = summary.op2_sum.wrapping_add(op2);
-    summary.isum2_sum = summary.isum2_sum.wrapping_add(isum2);
+        summary.op1_abs_sum = summary.op1_abs_sum.wrapping_add(signed_count_abs(op1));
+        summary.op2_abs_sum = summary.op2_abs_sum.wrapping_add(signed_count_abs(op2));
+        summary.isum2_abs_sum = summary.isum2_abs_sum.wrapping_add(signed_count_abs(isum2));
 
-    summary.op1_abs_sum = summary.op1_abs_sum.wrapping_add(signed_count_abs(op1));
-    summary.op2_abs_sum = summary.op2_abs_sum.wrapping_add(signed_count_abs(op2));
-    summary.isum2_abs_sum = summary.isum2_abs_sum.wrapping_add(signed_count_abs(isum2));
-
-    if first_ok {
-        summary.op1_min = op1;
-        summary.op1_max = op1;
-        summary.op2_min = op2;
-        summary.op2_max = op2;
-        summary.isum2_min = isum2;
-        summary.isum2_max = isum2;
-    } else {
-        if op1 < summary.op1_min {
+        if first_ok {
             summary.op1_min = op1;
-        }
-        if op1 > summary.op1_max {
             summary.op1_max = op1;
-        }
-        if op2 < summary.op2_min {
             summary.op2_min = op2;
-        }
-        if op2 > summary.op2_max {
             summary.op2_max = op2;
-        }
-        if isum2 < summary.isum2_min {
             summary.isum2_min = isum2;
-        }
-        if isum2 > summary.isum2_max {
             summary.isum2_max = isum2;
+        } else {
+            if op1 < summary.op1_min {
+                summary.op1_min = op1;
+            }
+            if op1 > summary.op1_max {
+                summary.op1_max = op1;
+            }
+            if op2 < summary.op2_min {
+                summary.op2_min = op2;
+            }
+            if op2 > summary.op2_max {
+                summary.op2_max = op2;
+            }
+            if isum2 < summary.isum2_min {
+                summary.isum2_min = isum2;
+            }
+            if isum2 > summary.isum2_max {
+                summary.isum2_max = isum2;
+            }
         }
     }
 
-    if sample.op3_vopamp3_valid == 1 {
-        let op3 = sample.op3_vopamp3_delta;
-        let first_op3 = summary.op3_vopamp3_samples == 0;
+    if sample.op3_vopamp3_injected_valid == 1 {
+        let op3v = sample.op3_vopamp3_injected_delta;
+        let first_op3v = summary.op3_vopamp3_injected_samples == 0;
 
-        summary.op3_vopamp3_samples = summary.op3_vopamp3_samples.wrapping_add(1);
-        summary.op3_vopamp3_sum = summary.op3_vopamp3_sum.wrapping_add(op3);
-        summary.op3_vopamp3_abs_sum = summary
-            .op3_vopamp3_abs_sum
-            .wrapping_add(signed_count_abs(op3));
+        summary.op3_vopamp3_injected_samples =
+            summary.op3_vopamp3_injected_samples.wrapping_add(1);
+        summary.op3_vopamp3_injected_sum =
+            summary.op3_vopamp3_injected_sum.wrapping_add(op3v);
+        summary.op3_vopamp3_injected_abs_sum = summary
+            .op3_vopamp3_injected_abs_sum
+            .wrapping_add(signed_count_abs(op3v));
 
-        if first_op3 {
-            summary.op3_vopamp3_min = op3;
-            summary.op3_vopamp3_max = op3;
+        if first_op3v {
+            summary.op3_vopamp3_injected_min = op3v;
+            summary.op3_vopamp3_injected_max = op3v;
         } else {
-            if op3 < summary.op3_vopamp3_min {
-                summary.op3_vopamp3_min = op3;
+            if op3v < summary.op3_vopamp3_injected_min {
+                summary.op3_vopamp3_injected_min = op3v;
             }
-            if op3 > summary.op3_vopamp3_max {
-                summary.op3_vopamp3_max = op3;
+            if op3v > summary.op3_vopamp3_injected_max {
+                summary.op3_vopamp3_injected_max = op3v;
             }
         }
     }
@@ -319,7 +368,11 @@ pub fn configure_current_sense_adc_sample_time_for_sync() {
     adc_set_sample_time_bits(ADC1_BASE, OP1_OUT_ADC_CHANNEL, CURRENT_SENSE_SYNC_SAMPLE_BITS);
     adc_set_sample_time_bits(ADC2_BASE, OP2_OUT_ADC_CHANNEL, CURRENT_SENSE_SYNC_SAMPLE_BITS);
     adc_set_sample_time_bits(ADC1_BASE, OP3_OUT_ADC_CHANNEL, CURRENT_SENSE_SYNC_SAMPLE_BITS);
-    adc_set_sample_time_bits(ADC2_BASE, OP3_INTERNAL_VOPAMP3_ADC2_CHANNEL, CURRENT_SENSE_SYNC_SAMPLE_BITS);
+    adc_set_sample_time_bits(
+        ADC2_BASE,
+        OP3_INTERNAL_VOPAMP3_ADC2_CHANNEL,
+        CURRENT_SENSE_SYNC_SAMPLE_BITS,
+    );
 }
 
 fn injected_jsqr_one_rank_tim1_ch4(channel: u32) -> u32 {
@@ -357,7 +410,7 @@ pub fn configure_current_sense_injected_tim1_ch4() -> CurrentSenseInjectedConfig
         let adc2_cfgr_rb = read_volatile(adc_cfgr(ADC2_BASE));
 
         let tim1_ch4_oc_ok = if (tim1_ccmr2 & (TIM1_CCMR2_CC4S_MASK | TIM1_CCMR2_OC4M_MASK))
-                == TIM1_CCMR2_OC4_INTERNAL_TRIGGER_CONFIG
+            == TIM1_CCMR2_OC4_INTERNAL_TRIGGER_CONFIG
             && (tim1_ccer & TIM1_CCER_CC4_OUTPUT_MASK) == 0
         {
             1
@@ -419,6 +472,91 @@ fn read_op3_vopamp3_internal_raw() -> (u16, u32) {
     let timeout = if raw == ADC_TIMEOUT_VALUE { 1 } else { 0 };
 
     (raw, timeout)
+}
+
+fn run_injected_pair_adc1_op1_adc2_channel(adc2_channel: u32) -> InjectedPairResult {
+    let adc1_jsqr = injected_jsqr_one_rank_tim1_ch4(OP1_OUT_ADC_CHANNEL);
+    let adc2_jsqr = injected_jsqr_one_rank_tim1_ch4(adc2_channel);
+    let cnt_before_arm = tim1_counter_raw();
+
+    unsafe {
+        refresh_tim1_ch4_internal_trigger_config();
+
+        write_volatile(adc_isr(ADC1_BASE), ADC_ISR_JEOC | ADC_ISR_JEOS | ADC_ISR_JQOVF);
+        write_volatile(adc_isr(ADC2_BASE), ADC_ISR_JEOC | ADC_ISR_JEOS | ADC_ISR_JQOVF);
+
+        write_volatile(adc_jsqr(ADC1_BASE), adc1_jsqr);
+        write_volatile(adc_jsqr(ADC2_BASE), adc2_jsqr);
+
+        let cr1 = read_volatile(adc_cr(ADC1_BASE));
+        let cr2 = read_volatile(adc_cr(ADC2_BASE));
+        write_volatile(adc_cr(ADC1_BASE), cr1 | ADC_CR_JADSTART);
+        write_volatile(adc_cr(ADC2_BASE), cr2 | ADC_CR_JADSTART);
+
+        let mut adc1_jeoc: u32 = 0;
+        let mut adc1_jeos: u32 = 0;
+        let mut adc2_jeoc: u32 = 0;
+        let mut adc2_jeos: u32 = 0;
+        let mut adc1_isr: u32 = 0;
+        let mut adc2_isr: u32 = 0;
+        let mut wait_loops: u32 = 0;
+
+        for loops in 0..CURRENT_SENSE_INJECTED_WAIT_MAX_LOOPS {
+            wait_loops = loops;
+            adc1_isr = read_volatile(adc_isr(ADC1_BASE));
+            adc2_isr = read_volatile(adc_isr(ADC2_BASE));
+
+            adc1_jeoc = if (adc1_isr & ADC_ISR_JEOC) != 0 { 1 } else { 0 };
+            adc1_jeos = if (adc1_isr & ADC_ISR_JEOS) != 0 { 1 } else { 0 };
+            adc2_jeoc = if (adc2_isr & ADC_ISR_JEOC) != 0 { 1 } else { 0 };
+            adc2_jeos = if (adc2_isr & ADC_ISR_JEOS) != 0 { 1 } else { 0 };
+
+            if adc1_jeos == 1 && adc2_jeos == 1 {
+                break;
+            }
+        }
+
+        let timeout = if adc1_jeos == 1 && adc2_jeos == 1 { 0 } else { 1 };
+
+        if timeout != 0 {
+            let cr1_stop = read_volatile(adc_cr(ADC1_BASE));
+            let cr2_stop = read_volatile(adc_cr(ADC2_BASE));
+            write_volatile(adc_cr(ADC1_BASE), cr1_stop | ADC_CR_JADSTP);
+            write_volatile(adc_cr(ADC2_BASE), cr2_stop | ADC_CR_JADSTP);
+        }
+
+        let raw1 = (read_volatile(adc_jdr1(ADC1_BASE)) & 0x0FFF) as u16;
+        let raw2 = (read_volatile(adc_jdr1(ADC2_BASE)) & 0x0FFF) as u16;
+        let cnt_after_read = tim1_counter_raw();
+
+        let near_high_rail = if raw1 >= CURRENT_SENSE_NEAR_HIGH_RAIL_RAW
+            || raw2 >= CURRENT_SENSE_NEAR_HIGH_RAIL_RAW
+        {
+            1
+        } else {
+            0
+        };
+
+        InjectedPairResult {
+            raw1,
+            raw2,
+            cnt_before_arm,
+            cnt_after_read,
+            wait_loops,
+
+            adc1_jeoc,
+            adc1_jeos,
+            adc2_jeoc,
+            adc2_jeos,
+            adc1_isr,
+            adc2_isr,
+            adc1_jsqr: read_volatile(adc_jsqr(ADC1_BASE)),
+            adc2_jsqr: read_volatile(adc_jsqr(ADC2_BASE)),
+
+            timeout,
+            near_high_rail,
+        }
+    }
 }
 
 pub fn capture_current_sense_offsets(samples: u32) -> CurrentSenseOffsets {
@@ -556,116 +694,105 @@ pub fn read_current_sense(offsets: CurrentSenseOffsets) -> CurrentSenseReading {
 }
 
 pub fn read_foc_prep_sample(offsets: CurrentSenseOffsets) -> FocPrepSample {
-    let cnt_before_arm = tim1_counter_raw();
+    let a = run_injected_pair_adc1_op1_adc2_channel(OP2_OUT_ADC_CHANNEL);
+    let b = run_injected_pair_adc1_op1_adc2_channel(OP3_INTERNAL_VOPAMP3_ADC2_CHANNEL);
+    let (op3_vopamp3_regular_raw, op3_vopamp3_regular_timeout) = read_op3_vopamp3_internal_raw();
 
-    unsafe {
-        refresh_tim1_ch4_internal_trigger_config();
+    let op1_a_delta = adc_delta(a.raw1, offsets.op1_zero);
+    let op1_b_delta = adc_delta(b.raw1, offsets.op1_zero);
+    let op2_a_delta = adc_delta(a.raw2, offsets.op2_zero);
+    let op3_vopamp3_injected_delta = adc_delta(b.raw2, offsets.op3_vopamp3_zero);
+    let op3_vopamp3_regular_delta =
+        adc_delta(op3_vopamp3_regular_raw, offsets.op3_vopamp3_zero);
 
-        write_volatile(adc_isr(ADC1_BASE), ADC_ISR_JEOC | ADC_ISR_JEOS | ADC_ISR_JQOVF);
-        write_volatile(adc_isr(ADC2_BASE), ADC_ISR_JEOC | ADC_ISR_JEOS | ADC_ISR_JQOVF);
+    let ok_a = if offsets.timeout == 0
+        && a.timeout == 0
+        && a.adc1_jeos == 1
+        && a.adc2_jeos == 1
+        && a.near_high_rail == 0
+    {
+        1
+    } else {
+        0
+    };
 
-        let cr1 = read_volatile(adc_cr(ADC1_BASE));
-        let cr2 = read_volatile(adc_cr(ADC2_BASE));
-        write_volatile(adc_cr(ADC1_BASE), cr1 | ADC_CR_JADSTART);
-        write_volatile(adc_cr(ADC2_BASE), cr2 | ADC_CR_JADSTART);
+    let op3_vopamp3_injected_valid = if offsets.op3_vopamp3_timeout == 0
+        && b.timeout == 0
+        && b.adc1_jeos == 1
+        && b.adc2_jeos == 1
+        && b.near_high_rail == 0
+    {
+        1
+    } else {
+        0
+    };
 
-        let mut adc1_jeoc: u32 = 0;
-        let mut adc1_jeos: u32 = 0;
-        let mut adc2_jeoc: u32 = 0;
-        let mut adc2_jeos: u32 = 0;
-        let mut adc1_isr: u32 = 0;
-        let mut adc2_isr: u32 = 0;
-        let mut wait_loops: u32 = 0;
+    let ok_b = op3_vopamp3_injected_valid;
 
-        for loops in 0..CURRENT_SENSE_INJECTED_WAIT_MAX_LOOPS {
-            wait_loops = loops;
-            adc1_isr = read_volatile(adc_isr(ADC1_BASE));
-            adc2_isr = read_volatile(adc_isr(ADC2_BASE));
+    let op3_vopamp3_regular_valid = if offsets.op3_vopamp3_timeout == 0
+        && op3_vopamp3_regular_timeout == 0
+        && op3_vopamp3_regular_raw < CURRENT_SENSE_NEAR_HIGH_RAIL_RAW
+    {
+        1
+    } else {
+        0
+    };
 
-            adc1_jeoc = if (adc1_isr & ADC_ISR_JEOC) != 0 { 1 } else { 0 };
-            adc1_jeos = if (adc1_isr & ADC_ISR_JEOS) != 0 { 1 } else { 0 };
-            adc2_jeoc = if (adc2_isr & ADC_ISR_JEOC) != 0 { 1 } else { 0 };
-            adc2_jeos = if (adc2_isr & ADC_ISR_JEOS) != 0 { 1 } else { 0 };
+    FocPrepSample {
+        target_cnt: CURRENT_SENSE_INJECTED_TIM1_CCR4,
 
-            if adc1_jeos == 1 && adc2_jeos == 1 {
-                break;
-            }
-        }
+        a_cnt_before_arm: a.cnt_before_arm,
+        a_cnt_after_read: a.cnt_after_read,
+        a_wait_loops: a.wait_loops,
 
-        let timeout = if adc1_jeos == 1 && adc2_jeos == 1 { 0 } else { 1 };
+        b_cnt_before_arm: b.cnt_before_arm,
+        b_cnt_after_read: b.cnt_after_read,
+        b_wait_loops: b.wait_loops,
 
-        if timeout != 0 {
-            let cr1_stop = read_volatile(adc_cr(ADC1_BASE));
-            let cr2_stop = read_volatile(adc_cr(ADC2_BASE));
-            write_volatile(adc_cr(ADC1_BASE), cr1_stop | ADC_CR_JADSTP);
-            write_volatile(adc_cr(ADC2_BASE), cr2_stop | ADC_CR_JADSTP);
-        }
+        op1_a_raw: a.raw1,
+        op1_b_raw: b.raw1,
+        op2_a_raw: a.raw2,
+        op3_vopamp3_injected_raw: b.raw2,
+        op3_vopamp3_regular_raw,
 
-        let op1_raw = (read_volatile(adc_jdr1(ADC1_BASE)) & 0x0FFF) as u16;
-        let op2_raw = (read_volatile(adc_jdr1(ADC2_BASE)) & 0x0FFF) as u16;
-        let cnt_after_read = tim1_counter_raw();
-        let (op3_vopamp3_raw, op3_vopamp3_timeout) = read_op3_vopamp3_internal_raw();
+        op1_a_delta,
+        op1_b_delta,
+        op2_a_delta,
+        op3_vopamp3_injected_delta,
+        op3_vopamp3_regular_delta,
 
-        let op1_delta = adc_delta(op1_raw, offsets.op1_zero);
-        let op2_delta = adc_delta(op2_raw, offsets.op2_zero);
-        let op3_vopamp3_delta = adc_delta(op3_vopamp3_raw, offsets.op3_vopamp3_zero);
+        op12_sum2: op1_a_delta + op2_a_delta,
+        op13v_sum2: op1_b_delta + op3_vopamp3_injected_delta,
 
-        let near_high_rail = if op1_raw >= CURRENT_SENSE_NEAR_HIGH_RAIL_RAW
-            || op2_raw >= CURRENT_SENSE_NEAR_HIGH_RAIL_RAW
-        {
-            1
-        } else {
-            0
-        };
+        op3_vopamp3_injected_valid,
+        op3_vopamp3_regular_valid,
 
-        let op3_vopamp3_valid = if offsets.op3_vopamp3_timeout == 0
-            && op3_vopamp3_timeout == 0
-            && op3_vopamp3_raw < CURRENT_SENSE_NEAR_HIGH_RAIL_RAW
-        {
-            1
-        } else {
-            0
-        };
+        a_adc1_jeoc: a.adc1_jeoc,
+        a_adc1_jeos: a.adc1_jeos,
+        a_adc2_jeoc: a.adc2_jeoc,
+        a_adc2_jeos: a.adc2_jeos,
+        a_adc1_isr: a.adc1_isr,
+        a_adc2_isr: a.adc2_isr,
+        a_adc1_jsqr: a.adc1_jsqr,
+        a_adc2_jsqr: a.adc2_jsqr,
 
-        let ok = if offsets.timeout == 0
-            && timeout == 0
-            && adc1_jeos == 1
-            && adc2_jeos == 1
-            && near_high_rail == 0
-        {
-            1
-        } else {
-            0
-        };
+        b_adc1_jeoc: b.adc1_jeoc,
+        b_adc1_jeos: b.adc1_jeos,
+        b_adc2_jeoc: b.adc2_jeoc,
+        b_adc2_jeos: b.adc2_jeos,
+        b_adc1_isr: b.adc1_isr,
+        b_adc2_isr: b.adc2_isr,
+        b_adc1_jsqr: b.adc1_jsqr,
+        b_adc2_jsqr: b.adc2_jsqr,
 
-        FocPrepSample {
-            target_cnt: CURRENT_SENSE_INJECTED_TIM1_CCR4,
-            cnt_before_arm,
-            cnt_after_read,
-            wait_loops,
+        a_timeout: a.timeout | offsets.timeout,
+        b_timeout: b.timeout | offsets.op3_vopamp3_timeout,
+        a_near_high_rail: a.near_high_rail,
+        b_near_high_rail: b.near_high_rail,
 
-            op1_raw,
-            op2_raw,
-            op3_vopamp3_raw,
-            op1_delta,
-            op2_delta,
-            op3_vopamp3_delta,
-            op_sum2: op1_delta + op2_delta,
-            op3_vopamp3_valid,
-
-            adc1_jeoc,
-            adc1_jeos,
-            adc2_jeoc,
-            adc2_jeos,
-            adc1_isr,
-            adc2_isr,
-            adc1_jsqr: read_volatile(adc_jsqr(ADC1_BASE)),
-            adc2_jsqr: read_volatile(adc_jsqr(ADC2_BASE)),
-
-            timeout: timeout | offsets.timeout,
-            near_high_rail,
-            ok,
-        }
+        ok_a,
+        ok_b,
+        ok: ok_a,
     }
 }
 
@@ -673,7 +800,7 @@ pub fn read_foc_prep_sample(offsets: CurrentSenseOffsets) -> FocPrepSample {
 // Footer
 // File: current_sense.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/current_sense.rs
-// Version: v0.5.24-warning-cleanup
+// Version: v0.5.25-injected-ab-op2-op3v
 // Created: 2026-06-08
-// Generated timestamp: 2026-06-08T17:10:00Z
+// Generated timestamp: 2026-06-08T18:00:00Z
 // ================================================================

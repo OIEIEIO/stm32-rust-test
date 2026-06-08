@@ -1,47 +1,34 @@
 // ================================================================
 // File: sine.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/sine.rs
-// Version: v0.5.23-op3v-regular-naming
-// Purpose: Open-loop sine/SPWM runner with compact TIM1-triggered
-//          injected ADC FOC-prep current sample output plus empirical
-//          OPAMP-to-command phase-mapping fields, OP3/VOPAMP3 regular
-//          ADC diagnostic naming, and end-of-run compact sector summaries
-//          for the B-G431B-ESC1 STM32G431CB Rust motor-control bring-up.
+// Version: v0.5.25-injected-ab-op2-op3v
+// Purpose: Open-loop sine/SPWM runner with TIM1_CH4-triggered injected
+//          ADC A/B diagnostics:
+//            A = ADC1 OP1 + ADC2 OP2
+//            B = ADC1 OP1 + ADC2 OP3/VOPAMP3
+//          plus OP3/VOPAMP3 regular ADC comparison and compact sector
+//          summaries for the B-G431B-ESC1 STM32G431CB bring-up.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 //
-// Change summary vs v0.5.22:
-//   - Renames OP3/VOPAMP3 log labels to make clear that this path is a
-//     regular ADC diagnostic read, not an injected ADC sample.
-//   - focmap log label cleanup:
-//       op1_i      -> op1_delta
-//       op2_i      -> op2_delta
-//       op3v_jraw  -> op3v_regular_raw
-//       op3v_i     -> op3v_regular_delta
-//       op3v_valid -> op3v_regular_valid
-//   - focsum compact labels now use explicit avg/count wording.
-//   - No drive, TIM1, ADC setup, sampling timing, or control behavior change.
+// Change summary vs first v0.5.25 draft:
+//   - Reads/logs all FocPrepSample fields so cargo build is warning-free.
+//   - Adds a_jeoc1/a_jeoc2/b_jeoc1/b_jeoc2 to focmap_ab.
+//   - Adds primary_ok to focmap_ab and sine heartbeat.
+//   - No motor-drive, ADC, TIM1, OPAMP, ramp, or safety behavior change.
 //
-// Change summary vs v0.5.21:
-//   - Adds OP3/VOPAMP3 diagnostic fields to focmap, sine heartbeat, and
-//     compact end-of-run sector summaries.
-//   - Keeps the default injected pair unchanged: ADC1=OP1, ADC2=OP2.
-//   - OP3/VOPAMP3 is logged as diagnostic-only data; it is not used for
-//     phase-current reconstruction or control output.
-//   - No intended motor-drive behavior change.
+// Change summary vs v0.5.24:
+//   - Adds injected-channel A/B diagnostic log fields.
+//   - Keeps motor drive, sine table, ramp, and safety behavior unchanged.
+//   - A pair proves the existing OP1/OP2 injected path remains healthy.
+//   - B pair tests ADC2 injected OP3/VOPAMP3 internal routing.
+//   - OP3/VOPAMP3 regular read remains logged for comparison.
+//   - Diagnostic only: no current control and no FOC math.
 //
 // Behavior:
 //   - Button released: all outputs off.
 //   - Button held: bootstrap precharge -> fixed sine alignment ->
 //     open-loop sine/SPWM electrical-angle ramp.
 //   - Release button: all-off.
-//   - Current sampling is observation-only.
-//
-// Learning notes:
-//   - v0.5.14 proved injected ADC completion (`JEOS`) for both software
-//     start and TIM1_CH4-triggered start.
-//   - v0.5.15 turned that proof into a repeatable FOC-prep sample log.
-//   - v0.5.23 keeps OP1/OP2 as the injected pair and labels OP3/VOPAMP3
-//     correctly as a regular ADC diagnostic read.
 // ================================================================
 
 use core::ptr::write_volatile;
@@ -71,19 +58,9 @@ use crate::tim1::{
     read_tim1_for_sine_pwm,
 };
 
-// Heavy health/readback interval.
-// With a 96-step table, 960 steps = 10 electrical revolutions.
 const SINE_HEALTH_EVERY_STEPS: u32 = 960;
-
-// Phase-map observation interval.
-// 257 is intentionally not a multiple of SINE_TABLE_LEN=96. This lets
-// the `focmap` line walk across different electrical phase indices while
-// leaving the slower health heartbeat cadence unchanged.
 const FOCMAP_SAMPLE_EVERY_STEPS: u32 = 257;
 
-// 96-entry sine table, Q10 scale.
-// Full scale = +/-1024.
-// Index spacing = 3.75 electrical degrees.
 const SINE_Q10: [i16; SINE_TABLE_LEN] = [
     0, 67, 134, 200, 265, 329, 392, 453, 512, 569, 623, 675,
     724, 770, 812, 851, 887, 918, 946, 970, 989, 1004, 1015, 1022,
@@ -117,10 +94,6 @@ fn sine_duty(table_index: usize, amplitude: u32) -> u32 {
 
 fn sine_duties_for_index(phase_index: usize, amplitude: u32) -> (u32, u32, u32) {
     let u_index = phase_index % SINE_TABLE_LEN;
-
-    // 120 electrical degrees = 32 samples at 96 samples/rev.
-    // V is theta - 120 deg, represented as +64 samples.
-    // W is theta + 120 deg, represented as +32 samples.
     let v_index = (u_index + ((SINE_TABLE_LEN * 2) / 3)) % SINE_TABLE_LEN;
     let w_index = (u_index + (SINE_TABLE_LEN / 3)) % SINE_TABLE_LEN;
 
@@ -253,54 +226,74 @@ fn log_focmap_sample(
     let dom = dominant_ref_label(ref_u, ref_v, ref_w);
     let dom_s = dominant_ref_sign(ref_u, ref_v, ref_w);
 
-    let op1_s = signed_count_sign(foc.op1_delta);
-    let op2_s = signed_count_sign(foc.op2_delta);
-    let op1_abs = signed_count_abs(foc.op1_delta);
-    let op2_abs = signed_count_abs(foc.op2_delta);
-    let op12_diff = signed_count_diff(foc.op1_delta, foc.op2_delta);
+    let op1_a_s = signed_count_sign(foc.op1_a_delta);
+    let op1_b_s = signed_count_sign(foc.op1_b_delta);
+    let op2_a_s = signed_count_sign(foc.op2_a_delta);
+    let op3v_inj_s = signed_count_sign(foc.op3_vopamp3_injected_delta);
+    let op3v_reg_s = signed_count_sign(foc.op3_vopamp3_regular_delta);
 
-    let op3v_regular_s = signed_count_sign(foc.op3_vopamp3_delta);
-    let op3v_regular_abs = signed_count_abs(foc.op3_vopamp3_delta);
+    let op12_diff = signed_count_diff(foc.op1_a_delta, foc.op2_a_delta);
+    let op13v_diff = signed_count_diff(foc.op1_b_delta, foc.op3_vopamp3_injected_delta);
 
     rprintln!(
-        "focmap run={} step={} erev={} phase_idx={} theta_x10={} sector60={} ok={} trig=tim1_ch4_center injected_pair=adc1_op1_adc2_op2 op3v_regular_path=adc2_in18 target={} wait={} cnt_a={} cnt_b={} jeoc1={} jeos1={} jeoc2={} jeos2={} to={} rail={} ref_u={} ref_v={} ref_w={} dom={} dom_s={} op1_jraw={} op1_delta={} op1_s={} op1_abs={} op2_jraw={} op2_delta={} op2_s={} op2_abs={} op3v_regular_raw={} op3v_regular_delta={} op3v_regular_s={} op3v_regular_abs={} op3v_regular_valid={} op12_diff={} isum2={} vbus_raw={} vbus_delta={} temp_raw={} u={} v={} w={} amp={} delay={}",
+        "focmap_ab run={} step={} erev={} phase_idx={} theta_x10={} sector60={} trig=tim1_ch4_center target={} primary_ok={} ok_a={} ok_b={} pair_a=adc1_op1_adc2_op2 pair_b=adc1_op1_adc2_op3v a_wait={} b_wait={} a_cnt0={} a_cnt1={} b_cnt0={} b_cnt1={} a_jeoc1={} a_jeoc2={} a_jeos1={} a_jeos2={} b_jeoc1={} b_jeoc2={} b_jeos1={} b_jeos2={} a_to={} b_to={} a_rail={} b_rail={} ref_u={} ref_v={} ref_w={} dom={} dom_s={} op1_a_jraw={} op1_a_delta={} op1_a_s={} op1_a_abs={} op2_a_jraw={} op2_a_delta={} op2_a_s={} op2_a_abs={} op1_b_jraw={} op1_b_delta={} op1_b_s={} op3v_injected_jraw={} op3v_injected_delta={} op3v_injected_s={} op3v_injected_abs={} op3v_injected_valid={} op3v_regular_raw={} op3v_regular_delta={} op3v_regular_s={} op3v_regular_valid={} op12_diff={} op13v_diff={} op12_sum2={} op13v_sum2={} vbus_raw={} vbus_delta={} temp_raw={} u={} v={} w={} amp={} delay={}",
         run_id,
         step_index,
         electrical_rev,
         phase_index,
         theta_x10,
         sector60,
-        foc.ok,
         foc.target_cnt,
-        foc.wait_loops,
-        foc.cnt_before_arm,
-        foc.cnt_after_read,
-        foc.adc1_jeoc,
-        foc.adc1_jeos,
-        foc.adc2_jeoc,
-        foc.adc2_jeos,
-        foc.timeout,
-        foc.near_high_rail,
+        foc.ok,
+        foc.ok_a,
+        foc.ok_b,
+        foc.a_wait_loops,
+        foc.b_wait_loops,
+        foc.a_cnt_before_arm,
+        foc.a_cnt_after_read,
+        foc.b_cnt_before_arm,
+        foc.b_cnt_after_read,
+        foc.a_adc1_jeoc,
+        foc.a_adc2_jeoc,
+        foc.a_adc1_jeos,
+        foc.a_adc2_jeos,
+        foc.b_adc1_jeoc,
+        foc.b_adc2_jeoc,
+        foc.b_adc1_jeos,
+        foc.b_adc2_jeos,
+        foc.a_timeout,
+        foc.b_timeout,
+        foc.a_near_high_rail,
+        foc.b_near_high_rail,
         ref_u,
         ref_v,
         ref_w,
         dom,
         dom_s,
-        foc.op1_raw,
-        foc.op1_delta,
-        op1_s,
-        op1_abs,
-        foc.op2_raw,
-        foc.op2_delta,
-        op2_s,
-        op2_abs,
-        foc.op3_vopamp3_raw,
-        foc.op3_vopamp3_delta,
-        op3v_regular_s,
-        op3v_regular_abs,
-        foc.op3_vopamp3_valid,
+        foc.op1_a_raw,
+        foc.op1_a_delta,
+        op1_a_s,
+        signed_count_abs(foc.op1_a_delta),
+        foc.op2_a_raw,
+        foc.op2_a_delta,
+        op2_a_s,
+        signed_count_abs(foc.op2_a_delta),
+        foc.op1_b_raw,
+        foc.op1_b_delta,
+        op1_b_s,
+        foc.op3_vopamp3_injected_raw,
+        foc.op3_vopamp3_injected_delta,
+        op3v_inj_s,
+        signed_count_abs(foc.op3_vopamp3_injected_delta),
+        foc.op3_vopamp3_injected_valid,
+        foc.op3_vopamp3_regular_raw,
+        foc.op3_vopamp3_regular_delta,
+        op3v_reg_s,
+        foc.op3_vopamp3_regular_valid,
         op12_diff,
-        foc.op_sum2,
+        op13v_diff,
+        foc.op12_sum2,
+        foc.op13v_sum2,
         adc.vbus_raw,
         adc_delta(adc.vbus_raw, baseline.vbus_raw),
         adc.temp_raw,
@@ -311,15 +304,19 @@ fn log_focmap_sample(
         step_delay
     );
 
-    if foc.ok != 1 {
+    if foc.ok_a != 1 || foc.ok_b != 1 {
         rprintln!(
-            "focdbg run={} step={} isr1=0x{:08x} isr2=0x{:08x} jsqr1=0x{:08x} jsqr2=0x{:08x}",
+            "focdbg_ab run={} step={} a_isr1=0x{:08x} a_isr2=0x{:08x} a_jsqr1=0x{:08x} a_jsqr2=0x{:08x} b_isr1=0x{:08x} b_isr2=0x{:08x} b_jsqr1=0x{:08x} b_jsqr2=0x{:08x}",
             run_id,
             step_index,
-            foc.adc1_isr,
-            foc.adc2_isr,
-            foc.adc1_jsqr,
-            foc.adc2_jsqr
+            foc.a_adc1_isr,
+            foc.a_adc2_isr,
+            foc.a_adc1_jsqr,
+            foc.a_adc2_jsqr,
+            foc.b_adc1_isr,
+            foc.b_adc2_isr,
+            foc.b_adc1_jsqr,
+            foc.b_adc2_jsqr
         );
     }
 
@@ -335,54 +332,54 @@ fn log_foc_sector_summaries(run_id: u32, summaries: &[FocSectorSummary; 6]) {
     let s5 = summaries[5];
 
     rprintln!(
-        "focsum_a run={} s0_samples={} s0_ok_samples={} s0_op1_avg={} s0_op2_avg={} s0_op3v_regular_samples={} s0_op3v_regular_avg={} s0_isum2_avg={} s1_samples={} s1_ok_samples={} s1_op1_avg={} s1_op2_avg={} s1_op3v_regular_samples={} s1_op3v_regular_avg={} s1_isum2_avg={} s2_samples={} s2_ok_samples={} s2_op1_avg={} s2_op2_avg={} s2_op3v_regular_samples={} s2_op3v_regular_avg={} s2_isum2_avg={}",
+        "focsum_a run={} s0_samples={} s0_ok_samples={} s0_op1_avg={} s0_op2_avg={} s0_op3v_injected_samples={} s0_op3v_injected_avg={} s0_isum2_avg={} s1_samples={} s1_ok_samples={} s1_op1_avg={} s1_op2_avg={} s1_op3v_injected_samples={} s1_op3v_injected_avg={} s1_isum2_avg={} s2_samples={} s2_ok_samples={} s2_op1_avg={} s2_op2_avg={} s2_op3v_injected_samples={} s2_op3v_injected_avg={} s2_isum2_avg={}",
         run_id,
         s0.samples,
         s0.ok_samples,
         s0.op1_avg(),
         s0.op2_avg(),
-        s0.op3_vopamp3_samples,
-        s0.op3_vopamp3_avg(),
+        s0.op3_vopamp3_injected_samples,
+        s0.op3_vopamp3_injected_avg(),
         s0.isum2_avg(),
         s1.samples,
         s1.ok_samples,
         s1.op1_avg(),
         s1.op2_avg(),
-        s1.op3_vopamp3_samples,
-        s1.op3_vopamp3_avg(),
+        s1.op3_vopamp3_injected_samples,
+        s1.op3_vopamp3_injected_avg(),
         s1.isum2_avg(),
         s2.samples,
         s2.ok_samples,
         s2.op1_avg(),
         s2.op2_avg(),
-        s2.op3_vopamp3_samples,
-        s2.op3_vopamp3_avg(),
+        s2.op3_vopamp3_injected_samples,
+        s2.op3_vopamp3_injected_avg(),
         s2.isum2_avg()
     );
 
     rprintln!(
-        "focsum_b run={} s3_samples={} s3_ok_samples={} s3_op1_avg={} s3_op2_avg={} s3_op3v_regular_samples={} s3_op3v_regular_avg={} s3_isum2_avg={} s4_samples={} s4_ok_samples={} s4_op1_avg={} s4_op2_avg={} s4_op3v_regular_samples={} s4_op3v_regular_avg={} s4_isum2_avg={} s5_samples={} s5_ok_samples={} s5_op1_avg={} s5_op2_avg={} s5_op3v_regular_samples={} s5_op3v_regular_avg={} s5_isum2_avg={}",
+        "focsum_b run={} s3_samples={} s3_ok_samples={} s3_op1_avg={} s3_op2_avg={} s3_op3v_injected_samples={} s3_op3v_injected_avg={} s3_isum2_avg={} s4_samples={} s4_ok_samples={} s4_op1_avg={} s4_op2_avg={} s4_op3v_injected_samples={} s4_op3v_injected_avg={} s4_isum2_avg={} s5_samples={} s5_ok_samples={} s5_op1_avg={} s5_op2_avg={} s5_op3v_injected_samples={} s5_op3v_injected_avg={} s5_isum2_avg={}",
         run_id,
         s3.samples,
         s3.ok_samples,
         s3.op1_avg(),
         s3.op2_avg(),
-        s3.op3_vopamp3_samples,
-        s3.op3_vopamp3_avg(),
+        s3.op3_vopamp3_injected_samples,
+        s3.op3_vopamp3_injected_avg(),
         s3.isum2_avg(),
         s4.samples,
         s4.ok_samples,
         s4.op1_avg(),
         s4.op2_avg(),
-        s4.op3_vopamp3_samples,
-        s4.op3_vopamp3_avg(),
+        s4.op3_vopamp3_injected_samples,
+        s4.op3_vopamp3_injected_avg(),
         s4.isum2_avg(),
         s5.samples,
         s5.ok_samples,
         s5.op1_avg(),
         s5.op2_avg(),
-        s5.op3_vopamp3_samples,
-        s5.op3_vopamp3_avg(),
+        s5.op3_vopamp3_injected_samples,
+        s5.op3_vopamp3_injected_avg(),
         s5.isum2_avg()
     );
 }
@@ -424,7 +421,7 @@ fn log_sine_health(
         let foc = read_foc_prep_sample(current_offsets);
 
         rprintln!(
-            "sine run={} step={} erev={} phase_idx={} delay={} amp={} u={} v={} w={} health_ok={} button={} af_ok={} no_phase_overlap={} tim1_sine_ok={} ccer_ok={} pwm_modes_ok={} moe={} dt={} ccr1={} ccr2={} ccr3={} vbus_raw={} vbus_delta={} temp_raw={} temp_delta={} temp_ok={} pot_raw={} foc_ok={} op3v_regular_valid={} op3v_regular_delta={} timeout={}",
+            "sine run={} step={} erev={} phase_idx={} delay={} amp={} u={} v={} w={} health_ok={} button={} af_ok={} no_phase_overlap={} tim1_sine_ok={} ccer_ok={} pwm_modes_ok={} moe={} dt={} ccr1={} ccr2={} ccr3={} vbus_raw={} vbus_delta={} temp_raw={} temp_delta={} temp_ok={} pot_raw={} foc_primary_ok={} foc_ok_a={} foc_ok_b={} op3v_injected_valid={} op3v_injected_delta={} op3v_regular_valid={} op3v_regular_delta={} timeout={}",
             run_id,
             step_index,
             electrical_rev,
@@ -453,22 +450,14 @@ fn log_sine_health(
             temp_ok,
             adc.pot_raw,
             foc.ok,
-            foc.op3_vopamp3_valid,
-            foc.op3_vopamp3_delta,
+            foc.ok_a,
+            foc.ok_b,
+            foc.op3_vopamp3_injected_valid,
+            foc.op3_vopamp3_injected_delta,
+            foc.op3_vopamp3_regular_valid,
+            foc.op3_vopamp3_regular_delta,
             adc.timeout
         );
-
-        if foc.ok != 1 {
-            rprintln!(
-                "focdbg run={} step={} isr1=0x{:08x} isr2=0x{:08x} jsqr1=0x{:08x} jsqr2=0x{:08x}",
-                run_id,
-                step_index,
-                foc.adc1_isr,
-                foc.adc2_isr,
-                foc.adc1_jsqr,
-                foc.adc2_jsqr
-            );
-        }
     }
 
     health_ok
@@ -476,7 +465,7 @@ fn log_sine_health(
 
 pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot, current_offsets: CurrentSenseOffsets) {
     rprintln!(
-        "sine_run_start run={} hold_button_to_run release_to_stop center={} min={} max={} start_amp={} max_amp={} amp_inc_per_erev={} table_len={} align_hold={} start_delay={} min_delay={} dec_per_erev={} max_steps={} log_every={} health_every={} focmap_every={} focmap=tim1_ch4_adc1_op1_adc2_op2_plus_op3v_regular_adc_diag focsum=end_of_run_compact_sector_summary",
+        "sine_run_start run={} hold_button_to_run release_to_stop center={} min={} max={} start_amp={} max_amp={} amp_inc_per_erev={} table_len={} align_hold={} start_delay={} min_delay={} dec_per_erev={} max_steps={} log_every={} health_every={} focmap_every={} focmap=injected_ab_adc1_op1_adc2_op2_then_adc1_op1_adc2_op3v focsum=end_of_run_compact_sector_summary",
         run_id,
         SINE_PWM_CENTER,
         SINE_PWM_MIN_DUTY,
@@ -678,7 +667,7 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot, current_offsets: Cu
 // Footer
 // File: sine.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/sine.rs
-// Version: v0.5.23-op3v-regular-naming
+// Version: v0.5.25-injected-ab-op2-op3v
 // Created: 2026-06-08
-// Generated timestamp: 2026-06-08T16:40:00Z
+// Generated timestamp: 2026-06-08T18:10:00Z
 // ================================================================

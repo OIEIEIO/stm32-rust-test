@@ -19,7 +19,7 @@
 
 [package]
 name = "b-g431b-esc1-rust"
-version = "0.5.24-warning-cleanup"
+version = "0.5.25-injected-ab-op2-op3v"
 edition = "2024"
 
 [dependencies]

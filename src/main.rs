@@ -1,38 +1,21 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.5.23-op3v-regular-naming
+// Version: v0.5.25-injected-ab-op2-op3v
 // Purpose: STM32G431CB Rust: open-loop sine/SPWM motor test plus
-//          compact TIM1-triggered injected ADC FOC-prep current sample
-//          output with empirical OPAMP-to-command phase-map fields,
-//          OP3/VOPAMP3 regular ADC diagnostic naming, and end-of-run
-//          compact sector summaries for the ST B-G431B-ESC1 board.
+//          TIM1_CH4-triggered injected ADC A/B diagnostics:
+//            A = ADC1 OP1 + ADC2 OP2
+//            B = ADC1 OP1 + ADC2 OP3/VOPAMP3
+//          with OP3/VOPAMP3 regular ADC comparison for the
+//          ST B-G431B-ESC1 board.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 //
-// Change summary vs v0.5.22:
-//   - Cleans startup/runtime wording so OP3/VOPAMP3 is consistently
-//     described as a regular ADC diagnostic read.
-//   - Keeps the actual injected pair wording explicit:
-//       ADC1 injected = OP1 external VOUT
-//       ADC2 injected = OP2 external VOUT
-//   - Does not change drive behavior, ADC setup, TIM1_CH4 setup, sampling
-//     timing, current offsets, sine ramp, or dead-man behavior.
-//
-// Change summary vs v0.5.21:
-//   - Adds startup/runtime log visibility for the OP3/VOPAMP3 internal
-//     routing diagnostic fields added in regs.rs/opamp.rs/current_sense.rs.
-//   - Keeps motor-drive behavior unchanged: same dead-man flow, same
-//     TIM1_CH4 trigger, same default ADC1=OP1 / ADC2=OP2 injected pair.
-//   - OP3/VOPAMP3 remains diagnostic only; no phase-current reconstruction,
-//     Clarke/Park, current PI, sector switching, or SVPWM.
-//
-// Learning notes:
-//   - Sine/SPWM mode drives all three phases using TIM1 CH1/CH1N,
-//     CH2/CH2N, and CH3/CH3N complementary PWM.
-//   - The TIM1_CH4-triggered injected pair is still OP1/OP2 only.
-//   - OP3/VOPAMP3 is currently sampled as a regular ADC2 diagnostic read
-//     so we can verify the internal routing before sector-switched current
-//     reconstruction.
+// Change summary vs v0.5.24:
+//   - Updates startup text and runtime notes for injected-channel A/B test.
+//   - Keeps motor-drive behavior unchanged.
+//   - Keeps OP1/OP2 as the proven A pair.
+//   - Adds B-pair diagnostic wording for ADC2 injected VOPAMP3.
+//   - No phase-current reconstruction, no FOC, no current loop.
 // ================================================================
 
 #![no_std]
@@ -272,7 +255,7 @@ fn main() -> ! {
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.5.23-op3v-regular-naming");
+    rprintln!("Version: v0.5.25-injected-ab-op2-op3v");
     rprintln!("Mode: open-loop sine/SPWM test");
     rprintln!("Button released: all outputs off.");
     rprintln!("Button held: precharge -> sine align -> open-loop sine ramp.");
@@ -289,16 +272,16 @@ fn main() -> ! {
     rprintln!("  OPAMP1: VINP0 PA1 -> VOUT PA2 -> ADC1_IN3");
     rprintln!("  OPAMP2: VINP0 PA7 -> VOUT PA6 -> ADC2_IN3");
     rprintln!("  OPAMP3 external: VINP0 PB0 -> VOUT PB1 -> ADC1_IN12");
-    rprintln!("  OPAMP3/VOPAMP3 regular diagnostic: internal route -> ADC2_IN18");
+    rprintln!("  OPAMP3/VOPAMP3 internal route: ADC2_IN18");
     rprintln!("  mode: PGA, gain x16, high-speed, factory trim");
     rprintln!("  note: raw ADC-count logging only; not calibrated amps");
+
     rprintln!(
-        "  foc-prep injected pair: trigger=TIM1_CH4 target_cnt={} ADC1=OP1_EXTERNAL ADC2=OP2_EXTERNAL sample_bits={} max_wait_loops={}",
+        "  injected A/B diagnostic: trigger=TIM1_CH4 target_cnt={} A=ADC1_OP1_PLUS_ADC2_OP2 B=ADC1_OP1_PLUS_ADC2_OP3V sample_bits={} max_wait_loops={}",
         CURRENT_SENSE_INJECTED_TIM1_CCR4,
         CURRENT_SENSE_SYNC_SAMPLE_BITS,
         CURRENT_SENSE_INJECTED_WAIT_MAX_LOOPS
     );
-    rprintln!("  op3v_regular diagnostic is not part of the injected pair yet.");
 
     rprintln!(
         "OPAMP status: setup_ok={} en1={} en2={} en3={} cfg1_ok={} cfg2_ok={} cfg3_ok={} op3_vopamp3_internal_ok={} csr1=0x{:08x} csr2=0x{:08x} csr3=0x{:08x}",
@@ -314,8 +297,9 @@ fn main() -> ! {
         opamp_status.csr2,
         opamp_status.csr3
     );
+
     rprintln!(
-        "Current-sense zero offsets: timeout={} samples_used={} samples_requested={} op1_zero={} op2_zero={} op3_zero={} op3v_regular_zero={} op3v_regular_samples_used={} op3v_regular_timeout={}",
+        "Current-sense zero offsets: timeout={} samples_used={} samples_requested={} op1_zero={} op2_zero={} op3_zero={} op3v_zero={} op3v_samples_used={} op3v_timeout={}",
         current_offsets.timeout,
         current_offsets.samples_used,
         current_offsets.samples_requested,
@@ -328,7 +312,7 @@ fn main() -> ! {
     );
 
     rprintln!(
-        "FOC-prep injected setup: setup_ok={} target_cnt={} tim1_ccr4={} ch4_oc_ok={} tim1_ccmr2=0x{:08x} tim1_ccer=0x{:08x} adc1_jsqr=0x{:08x} adc2_jsqr=0x{:08x} adc2_channel={} adc1_cfgr=0x{:08x} adc2_cfgr=0x{:08x} injected_pair=ADC1_OP1_EXTERNAL_ADC2_OP2_EXTERNAL op3v_regular_path=ADC2_IN18 trigger=TIM1_CH4",
+        "FOC-prep injected setup: setup_ok={} target_cnt={} tim1_ccr4={} ch4_oc_ok={} tim1_ccmr2=0x{:08x} tim1_ccer=0x{:08x} adc1_jsqr=0x{:08x} adc2_jsqr=0x{:08x} adc2_channel={} adc1_cfgr=0x{:08x} adc2_cfgr=0x{:08x} boot_pair=ADC1_OP1_ADC2_OP2 runtime_ab=A_OP2_B_OP3V trigger=TIM1_CH4",
         injected_config.setup_ok,
         injected_config.target_cnt,
         injected_config.tim1_ccr4,
@@ -353,26 +337,19 @@ fn main() -> ! {
     rprintln!("  table length:    {}", SINE_TABLE_LEN);
     rprintln!("  deadtime DTG:    {}", TIM1_BDTR_SINE_SAFE_DTG);
 
-    rprintln!("Sine ramp:");
-    rprintln!("  align hold:       {}", SINE_ALIGN_HOLD_DELAY);
-    rprintln!("  start step delay: {}", SINE_START_STEP_DELAY);
-    rprintln!("  min step delay:   {}", SINE_MIN_STEP_DELAY);
-    rprintln!("  decrement / erev: {}", SINE_DECREMENT_PER_ELECTRICAL_REV);
-    rprintln!("  max sine steps:   {}", SINE_MAX_STEPS_PER_HOLD);
-    rprintln!("  log every steps:  {}", SINE_LOG_EVERY_STEPS);
-
     rprintln!("Important:");
     rprintln!("  BEMF observe is not used in sine/SPWM mode.");
-    rprintln!("  Potentiometer is read only; it does not control this first test.");
+    rprintln!("  Potentiometer is read only; it does not control this test.");
     rprintln!("  This is open-loop angle generation only.");
-    rprintln!("  focmap lines use TIM1_CH4-triggered injected ADC for OP1/OP2 only.");
-    rprintln!("  OP3/VOPAMP3 is currently a regular ADC diagnostic read labeled op3v_regular_*.");
+    rprintln!("  focmap_ab lines run two injected conversions:");
+    rprintln!("    A: ADC1 injected OP1, ADC2 injected OP2");
+    rprintln!("    B: ADC1 injected OP1, ADC2 injected OP3/VOPAMP3");
+    rprintln!("  OP3/VOPAMP3 regular ADC read is also logged for comparison.");
     rprintln!("  Current-sense lines are observation-only and do not affect drive output.");
-    rprintln!("  op1/op2 samples are not named ia/ib until phase mapping is confirmed.");
-    rprintln!("  focsum lines print end-of-run compact sector summaries for OP1/OP2 plus OP3/VOPAMP3 regular diagnostic counts.");
+    rprintln!("  No phase-current reconstruction or FOC control has been added.");
 
     rprintln!(
-        "startup: startup_ok={} opamp_ok={} op3v_internal_ok={} cs_offset_ok={} op3v_regular_offset_ok={} af_ok={} pins_ok={} no_phase_overlap={} tim1_ok={} UH={} UL={} VH={} VL={} WH={} WL={} ccer={} moe={} forced_modes_ok={} pot_raw={} temp_raw={} vbus_raw={} op1_raw={} op2_raw={} op3_raw={} timeout={}",
+        "startup: startup_ok={} opamp_ok={} op3v_internal_ok={} cs_offset_ok={} op3v_offset_ok={} af_ok={} pins_ok={} no_phase_overlap={} tim1_ok={} UH={} UL={} VH={} VL={} WH={} WL={} ccer={} moe={} forced_modes_ok={} pot_raw={} temp_raw={} vbus_raw={} op1_raw={} op2_raw={} op3_raw={} timeout={}",
         startup_ok,
         opamp_status.setup_ok,
         opamp_status.op3_vopamp3_internal_ok,
@@ -401,9 +378,7 @@ fn main() -> ! {
     );
 
     rprintln!("Expected idle: startup_ok=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0");
-    rprintln!("During run: sine log lines show PWM/health; focmap lines walk through electrical phase for injected OP1/OP2 and regular OP3/VOPAMP3 diagnostic data.");
-    rprintln!("End of run: focsum sector summary labels use explicit *_samples and *_avg names.");
-    rprintln!("Current-sense: watch focmap ok=1, jeos1=1, jeos2=1, to=0, rail=0, op3v_regular_valid=1, changing phase_idx/sector60/ref_u/ref_v/ref_w/op1_delta/op2_delta/op3v_regular_delta.");
+    rprintln!("Watch focmap_ab: ok_a=1 ok_b=1 a_jeos1=1 a_jeos2=1 b_jeos1=1 b_jeos2=1 a_to=0 b_to=0.");
     rprintln!("Safety stops: button release, health fault, max step count.");
     rprintln!("================================================");
 
@@ -443,7 +418,7 @@ fn main() -> ! {
 // Footer
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.5.23-op3v-regular-naming
+// Version: v0.5.25-injected-ab-op2-op3v
 // Created: 2026-06-08
-// Generated timestamp: 2026-06-08T16:40:00Z
+// Generated timestamp: 2026-06-08T18:00:00Z
 // ================================================================
