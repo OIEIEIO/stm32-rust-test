@@ -1,12 +1,17 @@
 // ================================================================
 // File: regs.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/regs.rs
-// Version: v0.5.0-openloop-sine-support
+// Version: v0.5.2-openloop-sine-96-fast-loop
 // Purpose: Register addresses, bit masks, board pin IDs, ADC channel IDs,
 //          PWM constants, sine/SPWM bring-up constants, and small raw-
 //          register address helpers for the B-G431B-ESC1 STM32G431CB
 //          bring-up firmware.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
+//
+// Change summary vs v0.5.0:
+//   - Version string unified to the v0.5.2 baseline. No functional change.
+//   - All register addresses, masks, and sine/SPWM constants are unchanged
+//     and remain the values backing the validated quiet 96-step sine run.
 //
 // Change summary vs v0.4.1:
 //   - Preserves the existing six-step constants and CCER commutation table.
@@ -329,7 +334,7 @@ pub const BEMF_SAMPLES_PER_STEP: usize = 4;
 // Footer
 // File: regs.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/regs.rs
-// Version: v0.5.0-openloop-sine-support
+// Version: v0.5.2-openloop-sine-96-fast-loop
 // Created: 2026-06-07
-// Generated timestamp: 2026-06-07T00:00:00Z
+// Generated timestamp: 2026-06-08T03:57:09Z
 // ================================================================

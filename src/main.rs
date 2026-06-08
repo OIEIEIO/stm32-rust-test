@@ -1,10 +1,16 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.5.0-openloop-sine-spwm
-// Purpose: STM32G431CB Rust: first open-loop sine/SPWM motor test for
+// Version: v0.5.2-openloop-sine-96-fast-loop
+// Purpose: STM32G431CB Rust: open-loop sine/SPWM motor test for
 //          the ST B-G431B-ESC1 board.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
+//
+// Change summary vs v0.5.0:
+//   - Version string unified to the v0.5.2 baseline, including the RTT
+//     startup banner, so the running firmware reports the same milestone
+//     as Cargo.toml, sine.rs, and the README.
+//   - No change to startup sequence, control loop, or drive behavior.
 //
 // Change summary vs v0.4.1 split baseline:
 //   - Keeps the split module structure.
@@ -248,7 +254,7 @@ fn main() -> ! {
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.5.0-openloop-sine-spwm");
+    rprintln!("Version: v0.5.2-openloop-sine-96-fast-loop");
     rprintln!("Mode: open-loop sine/SPWM test");
     rprintln!("Button released: all outputs off.");
     rprintln!("Button held: precharge -> sine align -> open-loop sine ramp.");
@@ -346,7 +352,7 @@ fn main() -> ! {
 // Footer
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.5.0-openloop-sine-spwm
+// Version: v0.5.2-openloop-sine-96-fast-loop
 // Created: 2026-06-07
-// Generated timestamp: 2026-06-08T02:09:30Z
+// Generated timestamp: 2026-06-08T03:57:09Z
 // ================================================================

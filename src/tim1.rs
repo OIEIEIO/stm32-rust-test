@@ -1,12 +1,23 @@
 // ================================================================
 // File: tim1.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/tim1.rs
-// Version: v0.5.0-openloop-sine-support
+// Version: v0.5.2-openloop-sine-96-fast-loop
 // Purpose: TIM1 setup, forced-output state application, six-step PWM
 //          vector application, sine/SPWM complementary PWM helpers,
 //          and TIM1 readback verification for the B-G431B-ESC1
 //          STM32G431CB Rust motor-control bring-up.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
+//
+// Change summary vs v0.5.0:
+//   - Version string unified to the v0.5.2 baseline.
+//   - Removed the unused raw readback fields (cnt_a, cnt_b, ccer, bdtr,
+//     ccmr1, ccmr2) from Tim1SineReadback to clear the dead_code warning.
+//     Those raw registers are still read locally to derive the logged
+//     flags (tim1_sine_ok, ccer_ok, pwm_modes_ok, moe, deadtime); only
+//     the unlogged raw copies were dropped. The six-step Tim1Readback
+//     keeps its equivalent raw fields as the template if raw register
+//     dumps are wanted in the sine log later.
+//   - No change to PWM generation, dead-time, or any drive behavior.
 //
 // Change summary vs v0.4.4:
 //   - Preserves apply_state(), apply_pwm_vector(), setup_tim1_base(),
@@ -63,12 +74,6 @@ pub struct Tim1Readback {
 
 #[derive(Copy, Clone)]
 pub struct Tim1SineReadback {
-    pub cnt_a: u32,
-    pub cnt_b: u32,
-    pub ccer: u32,
-    pub bdtr: u32,
-    pub ccmr1: u32,
-    pub ccmr2: u32,
     pub ccr1: u32,
     pub ccr2: u32,
     pub ccr3: u32,
@@ -373,12 +378,6 @@ pub fn read_tim1_for_sine_pwm() -> Tim1SineReadback {
         };
 
         Tim1SineReadback {
-            cnt_a,
-            cnt_b,
-            ccer,
-            bdtr,
-            ccmr1,
-            ccmr2,
             ccr1,
             ccr2,
             ccr3,
@@ -430,7 +429,7 @@ pub fn setup_tim1_base() {
 // Footer
 // File: tim1.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/tim1.rs
-// Version: v0.5.0-openloop-sine-support
+// Version: v0.5.2-openloop-sine-96-fast-loop
 // Created: 2026-06-07
-// Generated timestamp: 2026-06-07T00:00:00Z
+// Generated timestamp: 2026-06-08T03:57:09Z
 // ================================================================
