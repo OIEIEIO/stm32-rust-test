@@ -1,65 +1,35 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.4.9-split-sixstep-same-behavior
-// Purpose: STM32G431CB Rust: PWM open-loop six-step with BEMF sense
-//          INSTRUMENTATION (observe only; loop stays open)
-//          Stage 9 split: register/pin constants moved to regs.rs; generic GPIO helpers moved to gpio.rs; drive state/readback helpers moved to drive.rs; TIM1 helpers moved to tim1.rs; ADC helpers moved to adc.rs; BEMF helpers moved to bemf.rs; delay/dead-man helpers moved to safety.rs; heavy/heartbeat logging helpers moved to log.rs; open-loop six-step ramp runner moved to sixstep.rs
+// Version: v0.5.0-openloop-sine-spwm
+// Purpose: STM32G431CB Rust: first open-loop sine/SPWM motor test for
+//          the ST B-G431B-ESC1 board.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 //
-// Change summary vs v0.3.2:
-//   - DRIVE UNCHANGED: same ramp, alignment, dead-man, timer-based
-//     commutation. The loop is still OPEN. No commutation decision
-//     uses BEMF. The motor spins exactly as v0.3.x did.
-//   - Added BEMF sense instrumentation so the floating-phase back-EMF
-//     can be OBSERVED before closing the loop:
-//       * GPIO_BEMF = PB5 driven as INPUT / high-Z -> divider DISABLED
-//         -> PWM-OFF, ground-referenced sampling (correct for low duty).
-//       * BEMF1=PA4 (U/OUT1, ADC2_IN17), BEMF2=PC4 (V/OUT2, ADC2_IN5),
-//         BEMF3=PB11 (W/OUT3, ADC2_IN14). ADC2 is the BEMF engine.
-//       * Each commutation step: blank (demag), then sample the
-//         FLOATING phase 4x across the step inside the PWM-OFF window
-//         (CNT polled against the duty), logged as b0..b3.
-//   - Run log is now per-step "bemf" lines (was per-erev heartbeat),
-//     so one electrical rev of log shows the BEMF trajectory.
-//   - Speed lowered for legible logging: RAMP_MIN_VECTOR_DELAY
-//     50000 -> 150000 (~150 RPM). BEMF smaller than at 450 RPM but
-//     clearly present. MAX_VECTOR_STEPS_PER_HOLD 1200 -> 600.
-//   - Duty UNCHANGED (20% max).
-//   - VERIFY FIRST: confirm each BEMF channel responds to its own
-//     phase (sanity-check the PA4/PC4/PB11 -> ADC2 channel numbers
-//     against DS12589) before trusting the waveform.
-//   - NOTE: still no closed loop; health_ok cannot detect a slip.
+// Change summary vs v0.4.1 split baseline:
+//   - Keeps the split module structure.
+//   - Keeps the known-good six-step and BEMF files in the repo.
+//   - Runtime test path is switched from six-step open-loop ramp to
+//     sine/SPWM open-loop ramp.
+//   - User experience is intentionally simple:
+//       button released -> all outputs off
+//       button held     -> precharge -> sine alignment -> sine ramp
+//       button released -> immediate all-off
+//   - No potentiometer control yet.
+//   - No BEMF decision logic.
+//   - No closed-loop commutation.
+//   - No FOC.
+//   - No SVPWM.
 //
-// Change summary v0.3.1 vs v0.3.0:
-//   - PWM frequency raised to ~20 kHz (inaudible). ARR 3999 -> 799 on
-//     the default HSI16 clock (16 MHz / 800 = 20 kHz).
-//   - Duty constants rescaled to the new ARR to preserve the SAME
-//     effective voltages as the v0.3.0 run (10% align/start, 20% max).
-//
-// Change summary of v0.3.0 vs v0.2.16 (forced-active baseline):
-//   - High-side drive: FORCED_ACTIVE (100% on) -> PWM_MODE_1 with duty.
-//   - Commutation: direct vector->vector, no per-step bootstrap /
-//     deadtime / all-off windows (PWM off-time freewheel recharges
-//     the high-side bootstrap caps via the low-side body diode).
-//   - Bootstrap precharge: done ONCE at run start (reuses the
-//     confirmed Bootstrap*L states), not per commutation.
-//   - Alignment: rotor is parked on one vector before the ramp.
-//   - Logging: split. Heavy verification dump kept for startup and
-//     fault only; a compact heartbeat is emitted once per electrical
-//     rev during the run.
-//   - Ramp constants retuned for the PWM regime (PWM bounds current,
-//     so the start can be faster than the forced-active version).
-//
-// Unchanged / confirmed-working and reused as-is:
-//   GPIO base setup, TIM1 base setup, drive-pin AF mapping, ADC setup,
-//   the commutation CCER table (expected_ccer), read_drive,
-//   pins_match_state, no_phase_overlap, dead-man release path,
-//   ramp_delay_for_step, startup readback, FaultAllOff handling.
-//
-// PWM frequency note: ARR is 799 on the default HSI16 clock, giving
-// ~20 kHz (above hearing). If a PLL has been configured elsewhere the
-// frequency scales with the timer clock; recompute ARR if so.
+// Learning notes:
+//   - Sine/SPWM mode drives all three phases using TIM1 CH1/CH1N,
+//     CH2/CH2N, and CH3/CH3N complementary PWM.
+//   - This differs from six-step mode, where one phase floats and BEMF
+//     can be observed. In sine/SPWM, BEMF observe is not meaningful
+//     because no phase is intentionally floating.
+//   - The first test remains dead-man-button controlled and conservative:
+//     fixed amplitude ramp, fixed electrical-angle ramp, low voltage,
+//     strict current limit, no prop.
 // ================================================================
 
 #![no_std]
@@ -76,40 +46,22 @@ mod gpio;
 mod drive;
 mod tim1;
 mod adc;
+#[allow(dead_code)]
 mod bemf;
 mod safety;
 mod log;
+#[allow(dead_code)]
 mod sixstep;
+mod sine;
 
-use crate::drive::*;
-use crate::tim1::*;
 use crate::adc::*;
-use crate::bemf::*;
-use crate::safety::*;
-use crate::log::*;
-use crate::sixstep::*;
+use crate::drive::*;
 use crate::gpio::*;
+use crate::log::*;
 use crate::regs::*;
-
-// ------------------------------------------------------------
-// ADC readback/setup/read helpers moved to adc.rs
-// ------------------------------------------------------------
-
-// ------------------------------------------------------------
-// Drive state/readback helpers moved to drive.rs
-// ------------------------------------------------------------
-
-// ------------------------------------------------------------
-// Delay / dead-man helpers moved to safety.rs
-// ------------------------------------------------------------
-
-// ------------------------------------------------------------
-// TIM1 helpers moved to tim1.rs
-// ------------------------------------------------------------
-
-// ------------------------------------------------------------
-// ADC helpers moved to adc.rs
-// ------------------------------------------------------------
+use crate::safety::*;
+use crate::sine::*;
+use crate::tim1::*;
 
 // ------------------------------------------------------------
 // Peripheral setup
@@ -262,14 +214,6 @@ fn setup_drive_pins_tim1_af() {
 }
 
 // ------------------------------------------------------------
-// Logging helpers moved to log.rs
-// ------------------------------------------------------------
-
-// ------------------------------------------------------------
-// Ramp scheduling / open-loop run helpers moved to sixstep.rs
-// ------------------------------------------------------------
-
-// ------------------------------------------------------------
 // Main
 // ------------------------------------------------------------
 
@@ -280,7 +224,6 @@ fn main() -> ! {
     setup_gpio_base();
     setup_tim1_base();
     setup_drive_pins_tim1_af();
-    setup_bemf_pins();
 
     apply_state(DriveState::IdleAllOff);
 
@@ -305,43 +248,42 @@ fn main() -> ! {
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.4.0-bemf-observe-openloop");
-    rprintln!("Mode: PWM open-loop six-step + BEMF observe (loop still OPEN)");
+    rprintln!("Version: v0.5.0-openloop-sine-spwm");
+    rprintln!("Mode: open-loop sine/SPWM test");
     rprintln!("Button released: all outputs off.");
-    rprintln!("Button held: precharge -> align hold -> ramped six-step.");
+    rprintln!("Button held: precharge -> sine align -> open-loop sine ramp.");
     rprintln!("Release button to stop immediately.");
     rprintln!("No prop. Low voltage. Strict bench current limit.");
-    rprintln!("PWM freq = timer_clk / {} (ARR+1). On HSI16 this is ~20 kHz (inaudible).", TIM1_TEST_ARR + 1);
+    rprintln!(
+        "PWM freq = timer_clk / {} (ARR+1). On HSI16 this is ~20 kHz.",
+        TIM1_TEST_ARR + 1
+    );
     rprintln!("ADC1 setup status: {}", adc1_setup_status);
     rprintln!("ADC2 setup status: {}", adc2_setup_status);
 
-    rprintln!("BEMF observe (PWM-off sampling, divider disabled):");
-    rprintln!("  GPIO_BEMF=PB5 held INPUT/high-Z (divider off, GND ref)");
-    rprintln!("  BEMF1=PA4=ADC2_IN17 (U), BEMF2=PC4=ADC2_IN5 (V), BEMF3=PB11=ADC2_IN14 (W)");
-    rprintln!("  per step: blank {} then {} samples in PWM-off window", BEMF_BLANK_DELAY, BEMF_SAMPLES_PER_STEP);
-    rprintln!("  log line 'bemf ...' shows floating phase b0..b3 per step");
-    rprintln!("  VERIFY each phase's BEMF channel responds before trusting data");
+    rprintln!("Sine/SPWM:");
+    rprintln!("  TIM1 complementary outputs: CH1/CH1N CH2/CH2N CH3/CH3N");
+    rprintln!("  center CCR:      {}", SINE_PWM_CENTER);
+    rprintln!("  min CCR clamp:   {}", SINE_PWM_MIN_DUTY);
+    rprintln!("  max CCR clamp:   {}", SINE_PWM_MAX_DUTY);
+    rprintln!("  start amplitude: {}", SINE_PWM_START_AMPLITUDE);
+    rprintln!("  max amplitude:   {}", SINE_PWM_RUN_MAX_AMPLITUDE);
+    rprintln!("  amp inc / erev:  {}", SINE_PWM_INC_PER_ELECTRICAL_REV);
+    rprintln!("  table length:    {}", SINE_TABLE_LEN);
+    rprintln!("  deadtime DTG:    {}", TIM1_BDTR_SINE_SAFE_DTG);
 
-    rprintln!("PWM duty (CCR vs ARR={}):", TIM1_TEST_ARR);
-    rprintln!("  align duty:      {}", PWM_DUTY_ALIGN);
-    rprintln!("  run start duty:  {}", PWM_DUTY_RUN_START);
-    rprintln!("  run max duty:    {}", PWM_DUTY_RUN_MAX);
-    rprintln!("  inc per erev:    {}", PWM_DUTY_INC_PER_EREV);
-    rprintln!("  align hold:      {}", ALIGN_HOLD_DELAY);
+    rprintln!("Sine ramp:");
+    rprintln!("  align hold:       {}", SINE_ALIGN_HOLD_DELAY);
+    rprintln!("  start step delay: {}", SINE_START_STEP_DELAY);
+    rprintln!("  min step delay:   {}", SINE_MIN_STEP_DELAY);
+    rprintln!("  decrement / erev: {}", SINE_DECREMENT_PER_ELECTRICAL_REV);
+    rprintln!("  max sine steps:   {}", SINE_MAX_STEPS_PER_HOLD);
+    rprintln!("  log every steps:  {}", SINE_LOG_EVERY_STEPS);
 
-    rprintln!("Ramp:");
-    rprintln!("  start vector delay: {}", RAMP_START_VECTOR_DELAY);
-    rprintln!("  min vector delay:   {}", RAMP_MIN_VECTOR_DELAY);
-    rprintln!("  decrement / erev:   {}", RAMP_DECREMENT_PER_ELECTRICAL_REV);
-    rprintln!("  max vector steps:   {}", MAX_VECTOR_STEPS_PER_HOLD);
-
-    rprintln!("Six-step sequence (high side PWMs, low side solid on):");
-    rprintln!("  1 vector_uh_vl  UH~PWM VL=1");
-    rprintln!("  2 vector_uh_wl  UH~PWM WL=1");
-    rprintln!("  3 vector_vh_wl  VH~PWM WL=1");
-    rprintln!("  4 vector_vh_ul  VH~PWM UL=1");
-    rprintln!("  5 vector_wh_ul  WH~PWM UL=1");
-    rprintln!("  6 vector_wh_vl  WH~PWM VL=1");
+    rprintln!("Important:");
+    rprintln!("  BEMF observe is not used in sine/SPWM mode.");
+    rprintln!("  Potentiometer is read only; it does not control this first test.");
+    rprintln!("  This is open-loop angle generation only.");
 
     rprintln!(
         "startup: startup_ok={} af_ok={} pins_ok={} no_phase_overlap={} tim1_ok={} UH={} UL={} VH={} VL={} WH={} WL={} ccer={} moe={} forced_modes_ok={} pot_raw={} temp_raw={} vbus_raw={} op1_raw={} op2_raw={} op3_raw={} timeout={}",
@@ -369,8 +311,8 @@ fn main() -> ! {
     );
 
     rprintln!("Expected idle: startup_ok=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0");
-    rprintln!("During run: heartbeat once per erev; high pins flicker (PWM).");
-    rprintln!("Safety stops: button release, health fault (af/overlap/temp/timeout), max step count.");
+    rprintln!("During run: sine log lines show CCR1/CCR2/CCR3 and health gate.");
+    rprintln!("Safety stops: button release, health fault, max step count.");
     rprintln!("================================================");
 
     let mut run_id: u32 = 1;
@@ -379,7 +321,7 @@ fn main() -> ! {
         apply_state(DriveState::IdleAllOff);
 
         if button_pressed() {
-            run_pwm_openloop_ramp(run_id, baseline);
+            run_sine_openloop(run_id, baseline);
 
             while button_pressed() {
                 apply_state(DriveState::IdleAllOff);
@@ -404,7 +346,7 @@ fn main() -> ! {
 // Footer
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.4.9-split-sixstep-same-behavior
+// Version: v0.5.0-openloop-sine-spwm
 // Created: 2026-06-07
-// Generated timestamp: 2026-06-07T00:00:00Z
+// Generated timestamp: 2026-06-08T02:09:30Z
 // ================================================================

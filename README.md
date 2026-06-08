@@ -2,35 +2,23 @@
 
 Rust bare-metal motor-control bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
 
-Current confirmed baseline:
+Current confirmed milestone:
 
 ```text
-v0.4.1-split-same-behavior
+v0.5.2-openloop-sine-96-fast-loop
 ```
 
 Current state:
 
 ```text
 The source split is complete and confirmed successful.
-The firmware is no longer a monolithic main.rs-only source file.
-The split preserved the previous v0.4.0 motor behavior.
-The build is warning-free after removing the unused DeadtimeAllOff placeholder state.
-The current motor-control mode remains open-loop six-step PWM with floating-phase BEMF observation only.
+The six-step implementation remains available as the known-good baseline.
+The active runtime test path is now open-loop sine/SPWM.
+The current sine/SPWM path uses a 96-step sine table and a fast CCR-only inner loop.
+Heavy ADC/TIM1/drive health checks are no longer done every sine sample.
+The motor spins smoothly and quietly in open-loop sine/SPWM bench testing.
 No closed-loop commutation has been added yet.
-No sinusoidal/SPWM control has been added yet.
-```
-
-Next planned control experiment:
-
-```text
-v0.5.0-openloop-sine-spwm
-```
-
-Goal of the next milestone:
-
-```text
-Add a separate open-loop sinusoidal/SPWM experiment after the successful source split is committed/tagged.
-Keep the current six-step implementation available as the known-good baseline.
+No FOC/current loop has been added yet.
 ```
 
 ---
@@ -60,11 +48,11 @@ Current motor-test setup:
 ```text
 Motor: 2212 BLDC, 900 KV
 Prop: none
-Bench voltage: 10 V during latest split-validation motor test
-Bench current-limit setting: 1.5 A
-Observed draw during latest test: about 300 mA
+Bench voltage: about 10 V during latest sine/SPWM testing
+Bench current-limit setting: bench-limited during testing
+Observed current during successful sine/SPWM run: about 400 mA
 Control mode: button-held dead-man operation
-Firmware mode: open-loop six-step PWM + BEMF observe
+Firmware mode: open-loop sine/SPWM, 96-step table, fast inner loop
 ```
 
 Current safety practice:
@@ -75,6 +63,7 @@ Low voltage.
 Bench current limit enabled.
 Button release stops the run.
 Board and motor are checked for abnormal heating during testing.
+VBUS and temperature are logged through ADC snapshots.
 ```
 
 ---
@@ -105,7 +94,7 @@ Normal workflow:
 cargo run --release
 ```
 
-`cargo embed` is not required for this project workflow. In testing, `cargo embed` could leave the terminal/session in an awkward state after Ctrl-C, so it is not listed as the recommended command.
+`cargo embed` is not required for this project workflow. In testing, `cargo run --release` has been the clean path.
 
 Clean build artifacts:
 
@@ -118,7 +107,7 @@ cargo build --release
 
 ## Current project tree
 
-The v0.4.1 source split is complete:
+The source split is complete and sine/SPWM has been added as a separate module:
 
 ```text
 .
@@ -137,6 +126,7 @@ The v0.4.1 source split is complete:
     ├── main.rs
     ├── regs.rs
     ├── safety.rs
+    ├── sine.rs
     ├── sixstep.rs
     └── tim1.rs
 ```
@@ -148,25 +138,22 @@ src/main.rs      startup sequence, top-level initialization, main control loop
 src/regs.rs      register bases, register pointers, bit masks, board constants
 src/gpio.rs      generic GPIO helpers, LED, button input
 src/adc.rs       ADC setup, channel selection, raw ADC reads, board monitor snapshot
-src/tim1.rs      TIM1 setup, PWM vectors, CCER/CCMR/BDTR readback
+src/tim1.rs      TIM1 setup, PWM vectors, sine PWM helpers, CCER/CCMR/BDTR readback
 src/drive.rs     DriveState, expected pin/CCER states, drive-pin readback, overlap checks
 src/bemf.rs      BEMF pin setup, floating-phase selection, floating-phase ADC sampling
-src/sixstep.rs   open-loop six-step ramp runner
+src/sixstep.rs   open-loop six-step ramp runner, retained as baseline
+src/sine.rs      open-loop sine/SPWM runner, current active experiment
 src/log.rs       structured RTT status logging
 src/safety.rs    delay helpers and button-held delay/dead-man helper
 ```
 
-Split validation rules that were followed:
+Design principle:
 
 ```text
-No intended behavior change.
-Kept the current six-step + BEMF observe path intact.
-Kept the same button dead-man behavior.
-Kept the same startup checks and safety logging.
-Kept the same motor-test behavior.
-Kept BEMF observation as-is.
-Did not add sine control during the split.
-Did not add closed-loop commutation during the split.
+Keep control strategies separated:
+sixstep.rs for six-step tests
+sine.rs for open-loop sinusoidal/SPWM tests
+foc.rs later for current-oriented control
 ```
 
 ---
@@ -208,7 +195,7 @@ PB15  AF4
 PC13  AF4
 ```
 
-BEMF sense network currently used for observation:
+BEMF sense network used for six-step observation:
 
 ```text
 PB5   GPIO_BEMF control
@@ -221,9 +208,8 @@ PB11  BEMF3 / W / OUT3 / ADC2_IN14
 Current BEMF configuration:
 
 ```text
-PB5 is held as input/high-Z.
-The BEMF divider is disabled for PWM-off, ground-referenced sampling.
-BEMF is observed only.
+BEMF is retained for six-step observation.
+BEMF is not used during sine/SPWM because all three phases are driven.
 No commutation decision uses BEMF yet.
 ```
 
@@ -484,9 +470,9 @@ The static command-path tests translated into real motor actuation. This was the
 
 ---
 
-### 8. Open-loop six-step spin
+### 8. Open-loop six-step spin baseline
 
-Current working motor-drive mode:
+Six-step baseline:
 
 ```text
 Open-loop six-step
@@ -497,7 +483,7 @@ Button held to run
 Button released to stop
 ```
 
-Current behavior:
+Observed behavior:
 
 ```text
 The motor can rotate continuously in open loop.
@@ -507,7 +493,7 @@ At higher commanded speed, BEMF readings became more visible.
 Board and motor stayed cool in reported tests.
 ```
 
-Latest split-validation motor test:
+Split-validation motor test:
 
 ```text
 Milestone: v0.4.1-split-same-behavior
@@ -521,13 +507,13 @@ Stop reason: max_steps
 No reported abnormal heating
 ```
 
-Representative run result from latest test:
+Representative run result:
 
 ```text
 run_stop run=2 cycle_ok=1 vector_steps=1000 button=1 reason=max_steps
 ```
 
-Safety fields observed during the split-validation run:
+Safety fields observed:
 
 ```text
 health_ok=1
@@ -553,7 +539,7 @@ PWM carrier:
 ```text
 TIM1 ARR = 799
 Default HSI16 timer clock assumption gives about 20 kHz PWM carrier.
-The audible buzz heard during tests is more likely six-step torque ripple, open-loop slip/catch behavior, logging/timing disturbance, or bench-supply current limiting, not the 20 kHz PWM carrier itself.
+The audible buzz heard during six-step tests is more likely torque ripple, open-loop slip/catch behavior, logging/timing disturbance, or bench-supply current limiting than the 20 kHz PWM carrier itself.
 ```
 
 Bring-up lesson:
@@ -613,7 +599,7 @@ At this stage, preserving the exact vector, floating phase, and raw b0..b3 sampl
 
 ---
 
-## Source split validation
+### 10. Source split validation
 
 Split milestone:
 
@@ -626,7 +612,7 @@ Build result:
 ```text
 cargo build --release passed.
 The previous DeadtimeAllOff dead-code warning was cleaned up by removing the unused placeholder state.
-The build is warning-free after that cleanup.
+The build was warning-free after that cleanup.
 ```
 
 No-motor runtime check:
@@ -637,21 +623,6 @@ Startup log appeared normally.
 Idle all-off state was confirmed.
 ADC logs remained present.
 BEMF startup text remained present.
-```
-
-Representative no-motor idle fields after split:
-
-```text
-state=idle_all_off
-button=0
-af_ok=1
-pins_ok=1
-no_phase_overlap=1
-active_count=0
-active_count_ok=1
-tim1_ok=1
-forced_modes_ok=1
-UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
 ```
 
 Motor/no-prop runtime check:
@@ -667,18 +638,81 @@ Conclusion:
 
 ```text
 The source split is confirmed successful.
-The current baseline is v0.4.1-split-same-behavior.
-The project is ready to commit/tag at this state before changing control behavior.
+The v0.4.1 baseline remains useful as the known-good split six-step state.
+```
+
+---
+
+### 11. Open-loop sine/SPWM milestone
+
+Current milestone:
+
+```text
+v0.5.2-openloop-sine-96-fast-loop
+```
+
+Goal:
+
+```text
+Test smoother open-loop sinusoidal phase-voltage control while keeping the same dead-man-button safety model.
+```
+
+Current sine/SPWM behavior:
+
+```text
+Button released: outputs disabled / all phases off
+Button held: bootstrap precharge -> sine alignment -> open-loop sine/SPWM ramp
+Button released during run: outputs return to all-off
+```
+
+Implementation summary:
+
+```text
+TIM1 complementary outputs are enabled for CH1/CH1N, CH2/CH2N, and CH3/CH3N.
+U/V/W are driven 120 electrical degrees apart.
+The first coarse 24-step sine table worked but still had audible buzz.
+Changing PWM carrier from about 20 kHz to about 32 kHz did not significantly reduce the noise.
+The 96-step sine table made the motor much quieter and smoother, but the first version was very slow.
+The v0.5.2 fast-loop rewrite moved heavy ADC/TIM1/drive health checks out of every sine step.
+The fast inner loop now updates CCR1/CCR2/CCR3 directly, checks the button, and delays.
+Slow health/readback/logging runs periodically instead of every sine sample.
+```
+
+Current observed sine/SPWM bench result:
+
+```text
+Motor spun up smoothly to a useful RPM.
+Rotation was much quieter than six-step.
+The 96-step fast-loop version produced only a slight high-pitched noise.
+Rotation was smooth and consistent on the bench.
+Observed draw was about 400 mA.
+No abnormal heating was reported during the successful test.
+```
+
+Important sine/SPWM limitation:
+
+```text
+This is still open-loop.
+Rotor angle is not measured.
+The code does not know whether the rotor is exactly aligned to the commanded electrical field.
+BEMF observation is not meaningful in this mode because all three phases are driven.
+This is not FOC.
+```
+
+Bring-up lesson:
+
+```text
+The major improvement came from separating fast waveform generation from slow diagnostics. The 96-step sine table made the waveform quiet, but the per-step health/readback loop dominated timing until v0.5.2 moved diagnostics out of the fast path.
 ```
 
 ---
 
 ## Current status
 
-Current baseline:
+Current active milestone:
 
 ```text
-v0.4.1-split-same-behavior
+v0.5.2-openloop-sine-96-fast-loop
 ```
 
 The project currently has working split-module firmware that can:
@@ -688,14 +722,15 @@ initialize STM32G431 clocks and peripherals directly
 configure GPIO, analog pins, and TIM1 alternate functions
 monitor VBUS and temperature through ADC
 verify drive-pin and TIM1 safety state
-command open-loop six-step PWM motor drive
+command open-loop six-step PWM motor drive as a retained baseline
 observe floating-phase BEMF during six-step operation
+command open-loop sine/SPWM motor drive through the active sine path
+run a quiet 96-step sine/SPWM open-loop bench test
 stop on button release
 log status through RTT
-build warning-free after removal of unused DeadtimeAllOff placeholder
 ```
 
-Current safety state from recent logs:
+Current safety state from recent logs and tests:
 
 ```text
 health_ok=1
@@ -717,7 +752,6 @@ phase-node switching waveform on a scope
 dead-time margin under higher current
 closed-loop six-step commutation
 sensorless zero-cross reliability
-sinusoidal/SPWM behavior on this board
 FOC current-loop behavior
 thermal behavior under sustained higher-power operation
 ```
@@ -726,64 +760,25 @@ A scope is still useful before aggressive PWM, higher current, closed-loop commu
 
 ---
 
-## Next control experiment: open-loop sine/SPWM
+## Next development directions
 
-Planned milestone:
+Near-term options:
 
 ```text
-v0.5.0-openloop-sine-spwm
+Commit/tag the current v0.5.2 sine/SPWM milestone.
+Add RPM/timing estimate fields to the sine logs.
+Add potentiometer-controlled speed or amplitude target.
+Tune sine ramp parameters after the fast-loop improvement.
+Keep sixstep.rs available as the BEMF-observe baseline.
 ```
 
-Goal:
+Longer-term FOC-oriented path:
 
 ```text
-Test smoother open-loop sinusoidal phase-voltage control.
-```
-
-Expected approach:
-
-```text
-Keep TIM1 PWM carrier around 20 kHz.
-Enable PWM on U, V, and W.
-Use a sine lookup table or equivalent phase-duty generator.
-Drive U/V/W 120 electrical degrees apart.
-Advance electrical angle open-loop.
-Ramp amplitude and electrical speed conservatively.
-Keep button dead-man.
-Keep VBUS and temperature monitoring.
-Disable current BEMF logging during the first sine test if the logging gets in the way of timing clarity.
-Keep sixstep.rs available as the known-good baseline.
-```
-
-Expected benefit:
-
-```text
-Smoother commanded phase voltages than six-step.
-Less hard vector-to-vector torque ripple.
-Better learning step toward FOC.
-```
-
-Important limitation:
-
-```text
-Open-loop sine is not FOC.
-Open-loop sine does not know rotor angle.
-It can still slip if the ramp is too aggressive.
-FOC requires rotor angle estimation or sensing, current feedback, transforms, and current-loop control.
-```
-
----
-
-## Longer-term path toward FOC
-
-Likely development sequence:
-
-```text
-v0.4.1 split same behavior
-v0.5.0 open-loop sine/SPWM
-v0.5.x sine tuning and safety cleanup
+v0.5.2 open-loop sine/SPWM fast loop
+v0.5.x sine timing/ramp tuning and safety cleanup
 v0.6.x current monitor calibration
-v0.7.x structured motor-control timing
+v0.7.x structured motor-control timing, likely timer-driven update path
 v0.8.x rotor-angle estimation experiments
 v0.9.x first closed-loop current-control experiments
 ```
@@ -791,7 +786,6 @@ v0.9.x first closed-loop current-control experiments
 FOC-oriented modules later may include:
 
 ```text
-sine.rs
 foc.rs
 clarke_park.rs
 current.rs
@@ -800,13 +794,10 @@ observer.rs
 motor_params.rs
 ```
 
-Design principle:
+Important limitation before FOC:
 
 ```text
-Keep control strategies separated:
-sixstep.rs for six-step tests
-sine.rs for open-loop sinusoidal/SPWM tests
-foc.rs for later current-oriented control
+FOC requires rotor angle estimation or sensing, usable current feedback, transforms, and current-loop control. The current sine/SPWM milestone is a useful stepping stone, not a current-controlled system.
 ```
 
 ---
@@ -818,15 +809,5 @@ Use version tags matching tested firmware milestones, for example:
 ```text
 v0.4.0-bemf-observe-openloop
 v0.4.1-split-same-behavior
-v0.5.0-openloop-sine-spwm
-```
-
-Recommended split commit:
-
-```bash
-git add Cargo.toml README.md src/main.rs src/*.rs
-git commit -m "Confirm v0.4.1 split same behavior"
-git tag -a v0.4.1-split-same-behavior -m "Split firmware into modules without behavior change"
-git push
-git push origin v0.4.1-split-same-behavior
+v0.5.2-openloop-sine-96-fast-loop
 ```

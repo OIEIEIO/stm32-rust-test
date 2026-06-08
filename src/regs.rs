@@ -1,23 +1,31 @@
 // ================================================================
 // File: regs.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/regs.rs
-// Version: v0.4.1-split-regs-same-behavior
+// Version: v0.5.0-openloop-sine-support
 // Purpose: Register addresses, bit masks, board pin IDs, ADC channel IDs,
-//          and small raw-register address helpers for the B-G431B-ESC1
-//          STM32G431CB bring-up firmware.
+//          PWM constants, sine/SPWM bring-up constants, and small raw-
+//          register address helpers for the B-G431B-ESC1 STM32G431CB
+//          bring-up firmware.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 //
-// Split note:
-//   This file is a mechanical extraction from main.rs v0.4.0.
-//   It must not change register values, pin mappings, timing constants,
-//   PWM constants, BEMF channel mappings, or ADC helper offsets.
+// Change summary vs v0.4.1:
+//   - Preserves the existing six-step constants and CCER commutation table.
+//   - Adds TIM1 complementary PWM CCER mask for sine/SPWM mode.
+//   - Adds TIM1 BDTR dead-time mask/value for safe complementary switching.
+//   - Adds first-test open-loop sine/SPWM constants.
+//   - Does not change pin mappings, ADC channels, BEMF channels, or the
+//     existing six-step ramp constants.
 //
 // Learning notes:
-//   - Keep board-specific raw register constants centralized here so the
-//     later GPIO / ADC / TIM1 / BEMF modules can share one mapping source.
-//   - These are direct-register bare-metal definitions, not HAL objects.
-//   - Pointer constants intentionally stay as raw *mut/*const register
-//     addresses because the existing firmware already validates this path.
+//   - Six-step mode uses one PWM high side, one solid low side, and one
+//     floating phase. Sine/SPWM mode drives all three half-bridges with
+//     complementary PWM, so TIM1 hardware dead-time matters.
+//   - TIM1 CH1/CH1N, CH2/CH2N, and CH3/CH3N are treated as three
+//     complementary half-bridges. CCER enables the main and N outputs;
+//     BDTR.MOE gates the bridge globally.
+//   - Sine bring-up constants are deliberately conservative. The first
+//     goal is to prove smooth three-phase PWM generation under the same
+//     dead-man-button safety model, not to produce torque efficiently.
 // ================================================================
 
 // ------------------------------------------------------------
@@ -106,6 +114,7 @@ pub const TIM1_CR1_CEN: u32 = 1 << 0;
 pub const TIM1_CR1_ARPE: u32 = 1 << 7;
 pub const TIM1_EGR_UG: u32 = 1 << 0;
 
+pub const TIM1_BDTR_DTG_MASK: u32 = 0xFF;
 pub const TIM1_BDTR_OSSI: u32 = 1 << 10;
 pub const TIM1_BDTR_OSSR: u32 = 1 << 11;
 pub const TIM1_BDTR_MOE: u32 = 1 << 15;
@@ -115,7 +124,7 @@ pub const TIM1_CCMR_FORCED_ACTIVE: u32 = 0b101;
 pub const TIM1_CCMR_PWM_MODE_1: u32 = 0b110;
 
 // ------------------------------------------------------------
-// CCER command states (UNCHANGED commutation table)
+// CCER command states: six-step baseline
 // ------------------------------------------------------------
 
 pub const TIM1_CCER_ALL_OFF_FORCED_LOW: u32 =
@@ -134,6 +143,22 @@ pub const TIM1_CCER_VECTOR_VH_UL: u32 = (1 << 4) | (1 << 0) | (1 << 2);
 pub const TIM1_CCER_VECTOR_WH_UL: u32 = (1 << 8) | (1 << 0) | (1 << 2);
 pub const TIM1_CCER_VECTOR_WH_VL: u32 = (1 << 8) | (1 << 4) | (1 << 6);
 
+// ------------------------------------------------------------
+// CCER / BDTR command states: sine/SPWM bring-up
+// ------------------------------------------------------------
+// Enables CH1, CH1N, CH2, CH2N, CH3, CH3N with default polarity.
+// TIM1 hardware complementary output + BDTR dead-time handles shoot-
+// through protection between each high/low pair.
+
+pub const TIM1_CCER_SINE_COMPLEMENTARY_PWM: u32 =
+    (1 << 0) | (1 << 2) |
+    (1 << 4) | (1 << 6) |
+    (1 << 8) | (1 << 10);
+
+// DTG=32 at a 16 MHz timer clock is about 2 us. This is intentionally
+// conservative for the first complementary-SPWM bench test.
+pub const TIM1_BDTR_SINE_SAFE_DTG: u32 = 32;
+
 pub const TIM1_TEST_PSC: u32 = 0;
 pub const TIM1_TEST_ARR: u32 = 799;
 
@@ -150,10 +175,10 @@ pub const BOOTSTRAP_HOLD_DELAY: u32 = 400_000;
 pub const RELEASE_CHECK_CHUNK: u32 = 40_000;
 
 // ------------------------------------------------------------
-// PWM open-loop drive constants
+// PWM open-loop six-step drive constants
 // ------------------------------------------------------------
 // Duty is expressed directly as a CCR count against ARR (799).
-// 80/800 = 10%, 120/800 = 15%, 160/800 = 20%.
+// 80/800 = 10%, 100/800 = 12.5%.
 
 pub const PWM_DUTY_ALIGN: u32 = 80;
 pub const PWM_DUTY_RUN_START: u32 = 80;
@@ -162,17 +187,35 @@ pub const PWM_DUTY_INC_PER_EREV: u32 = 5;
 
 pub const ALIGN_HOLD_DELAY: u32 = 1_500_000;
 
-// Ramp for the BEMF-observe build: lower top speed than the ceiling
-// test so per-step logging is legible and one electrical rev of log
-// shows the BEMF trajectory across all three phases.
-// ~150 RPM target: 150000 cyc/vec -> 900000 cyc/erev -> ~17.8 Hz elec
-// -> /7 pole-pairs -> ~2.5 rev/s -> ~152 RPM on a 2212.
 pub const RAMP_START_VECTOR_DELAY: u32 = 500_000;
 pub const RAMP_MIN_VECTOR_DELAY: u32 = 1_000;
 pub const RAMP_DECREMENT_PER_ELECTRICAL_REV: u32 = 100_000;
 pub const MAX_VECTOR_STEPS_PER_HOLD: u32 = 1000;
 
 pub const TEMP_DELTA_ABORT_RAW: i32 = 500;
+
+// ------------------------------------------------------------
+// Open-loop sine/SPWM first-test constants
+// ------------------------------------------------------------
+// CCR range is kept away from 0 and ARR so complementary PWM always
+// has useful off-time and avoids extreme duty commands during bring-up.
+
+pub const SINE_PWM_CENTER: u32 = TIM1_TEST_ARR / 2;
+pub const SINE_PWM_MIN_DUTY: u32 = 40;
+pub const SINE_PWM_MAX_DUTY: u32 = TIM1_TEST_ARR - 40;
+
+pub const SINE_PWM_START_AMPLITUDE: u32 = 45;
+pub const SINE_PWM_RUN_MAX_AMPLITUDE: u32 = 90;
+pub const SINE_PWM_INC_PER_ELECTRICAL_REV: u32 = 4;
+
+pub const SINE_TABLE_LEN: usize = 96;
+pub const SINE_ALIGN_HOLD_DELAY: u32 = 1_000_000;
+
+pub const SINE_START_STEP_DELAY: u32 = 8_000;
+pub const SINE_MIN_STEP_DELAY: u32 = 2_850;
+pub const SINE_DECREMENT_PER_ELECTRICAL_REV: u32 = 250;
+pub const SINE_MAX_STEPS_PER_HOLD: u32 = 32000;
+pub const SINE_LOG_EVERY_STEPS: u32 = 960;
 
 // ------------------------------------------------------------
 // ADC register helpers
@@ -263,7 +306,7 @@ pub const ADC_TIMEOUT_VALUE: u16 = 0xFFFF;
 // INPUT / high-Z disables it (PWM-OFF, ground-referenced sampling).
 // At our low duty we use PWM-OFF sampling -> PB5 held as INPUT.
 //
-// Phase -> tap -> pin -> ADC2 channel (confirm vs DS12589 on first run):
+// Phase -> tap -> pin -> ADC2 channel:
 //   U / OUT1 -> BEMF1 -> PA4  -> ADC2_IN17
 //   V / OUT2 -> BEMF2 -> PC4  -> ADC2_IN5
 //   W / OUT3 -> BEMF3 -> PB11 -> ADC2_IN14
@@ -278,14 +321,15 @@ pub const BEMF1_ADC_CHANNEL: u32 = 17; // ADC2_IN17 (PA4, U)
 pub const BEMF2_ADC_CHANNEL: u32 = 5; // ADC2_IN5  (PC4, V)
 pub const BEMF3_ADC_CHANNEL: u32 = 14; // ADC2_IN14 (PB11, W)
 
-pub const BEMF_SAMPLE_BITS: u32 = 0b011; // 24.5 ADC cycles (fast, fits off-window)
-pub const BEMF_BLANK_DELAY: u32 = 30_000; // post-commutation demag before sampling
+pub const BEMF_SAMPLE_BITS: u32 = 0b011; // 24.5 ADC cycles
+pub const BEMF_BLANK_DELAY: u32 = 30_000;
 pub const BEMF_SAMPLES_PER_STEP: usize = 4;
+
 // ================================================================
 // Footer
 // File: regs.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/regs.rs
-// Version: v0.4.1-split-regs-same-behavior
+// Version: v0.5.0-openloop-sine-support
 // Created: 2026-06-07
 // Generated timestamp: 2026-06-07T00:00:00Z
 // ================================================================
