@@ -1,4 +1,6 @@
-#Rust `no_std` bare-metal bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
+# B-G431B-ESC1 Rust Bring-up
+
+Rust bare-metal bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
 
 Current confirmed milestone:
 
@@ -6,24 +8,24 @@ Current confirmed milestone:
 v0.4.0-bemf-observe-openloop
 ```
 
-Current code state:
+Current working baseline:
 
 ```text
-Monolithic src/main.rs baseline.
-Open-loop six-step PWM motor drive.
-BEMF observe instrumentation added.
-No closed-loop commutation yet.
-No sinusoidal/SPWM yet.
+Monolithic src/main.rs
+Open-loop six-step PWM motor drive
+Floating-phase BEMF observation only
+No closed-loop commutation yet
 ```
 
-Major current milestone:
+Near-term direction:
 
 ```text
-Small BLDC motor spins open-loop from direct TIM1 complementary-output control.
-Floating-phase BEMF path is observable at higher RPM, but not clean enough yet for closed-loop use.
+1. Preserve and commit the current monolithic v0.4.0 baseline.
+2. Split src/main.rs into focused modules with no behavior change.
+3. Test the split version against the same motor/BEMF behavior.
+4. Add open-loop sine/SPWM as the next control experiment.
+5. Later prepare for current-sensed FOC work.
 ```
-
-The next immediate project step is a **refactor-only file split** of the current working monolithic firmware. After that split builds and behaves the same, the next control experiment will be **open-loop sinusoidal/SPWM**.
 
 ---
 
@@ -32,10 +34,9 @@ The next immediate project step is a **refactor-only file split** of the current
 ```text
 Board: ST B-G431B-ESC1 Discovery kit
 MCU: STM32G431CB
-Core: Arm Cortex-M4F
 Gate drivers: L6387
 MOSFETs: STL180N6F7
-Debug/logging: ST-LINK/V2-1, probe-rs, cargo-embed, RTT
+Debug/logging: ST-LINK/V2-1, probe-rs, RTT
 Target: thumbv7em-none-eabihf
 ```
 
@@ -48,25 +49,20 @@ flash: 128 KiB
 sram: 32 KiB
 ```
 
-Motor test setup used so far:
+Current motor-test setup:
 
 ```text
-Small 2212-class BLDC motor
+Small 2212 BLDC motor
 No prop
 Bench supply around 8 V during early spin tests
-Current-limited bench supply, initially low and later raised cautiously
-Board and motor remained cool during short tests
+Current-limited supply, raised cautiously as needed
+Button-held dead-man operation
+Board and motor remained cool during the latest tests
 ```
 
 ---
 
 ## Useful commands
-
-Clean:
-
-```bash
-cargo clean
-```
 
 Build:
 
@@ -77,7 +73,7 @@ cargo build --release
 Flash/run:
 
 ```bash
-cargo embed --release
+cargo run --release
 ```
 
 Attach RTT monitor without reflashing:
@@ -86,13 +82,26 @@ Attach RTT monitor without reflashing:
 probe-rs attach --chip STM32G431CB target/thumbv7em-none-eabihf/release/b-g431b-esc1-rust
 ```
 
-Check tree:
+Normal workflow:
 
-```bash
-tree
+```text
+cargo run --release
 ```
 
-Current tree before the split:
+`cargo embed` is not required for this project workflow. In testing, `cargo embed` could leave the terminal/session in an awkward state after Ctrl-C, so it is not listed as the recommended command.
+
+Clean build artifacts:
+
+```bash
+cargo clean
+cargo build --release
+```
+
+---
+
+## Current project tree
+
+Before the planned split, the project is intentionally simple:
 
 ```text
 .
@@ -106,15 +115,35 @@ Current tree before the split:
     └── main.rs
 ```
 
+The first refactor will only add files under `src/`.
+
+Expected split direction:
+
+```text
+src/
+├── main.rs
+├── regs.rs
+├── gpio.rs
+├── adc.rs
+├── tim1.rs
+├── drive.rs
+├── bemf.rs
+├── sixstep.rs
+├── log.rs
+└── safety.rs
+```
+
+The first split is a refactor-only step. It should preserve the current `v0.4.0-bemf-observe-openloop` behavior before sine control is added.
+
 ---
 
 ## Confirmed board signals
 
-Basic board I/O:
+General board I/O:
 
 ```text
 PC6   STATUS LED
-PC10  user button input, active-low dead-man
+PC10  user button input, active-low
 PB12  potentiometer / ADC1_IN11
 PB14  temperature feedback / ADC1_IN5
 PA0   VBUS feedback / ADC1_IN1
@@ -145,125 +174,202 @@ PB15  AF4
 PC13  AF4
 ```
 
-BEMF detection network currently used for observation:
+BEMF sense network currently used for observation:
 
 ```text
 PB5   GPIO_BEMF control
+
 PA4   BEMF1 / U / OUT1 / ADC2_IN17
 PC4   BEMF2 / V / OUT2 / ADC2_IN5
 PB11  BEMF3 / W / OUT3 / ADC2_IN14
 ```
 
-Current BEMF mode:
+Current BEMF configuration:
 
 ```text
-PB5 held as input / high-Z.
-On-board BEMF divider disabled.
-Samples are taken during PWM-off timing windows for ground-referenced observation.
-```
-
-Bring-up note:
-
-```text
-GPIO alternate-function routing alone is not enough for the motor outputs.
-TIM1 CCER, CCMR mode fields, BDTR.MOE, complementary polarity, and safe idle behavior all have to agree before the gate-driver inputs behave correctly.
+PB5 is held as input/high-Z.
+The BEMF divider is disabled for PWM-off, ground-referenced sampling.
+BEMF is observed only.
+No commutation decision uses BEMF yet.
 ```
 
 ---
 
 ## Bring-up summary
 
-### 1. Rust firmware / RTT / direct register access
+### 1. Rust no_std firmware baseline
 
 Confirmed:
 
 ```text
-Rust no_std firmware runs on STM32G431CB.
+no_std / no_main firmware works.
+cortex-m-rt entry works.
 RTT logging works through probe-rs.
-Direct register access with read_volatile/write_volatile is sufficient for this bring-up.
-No HAL dependency is required for the current experiments.
+Direct register access through read_volatile/write_volatile works.
+panic-halt is used.
 ```
 
-Learning note:
+Bring-up lesson:
 
 ```text
-The bring-up is intentionally close to the metal. RCC, GPIO, ADC, and TIM1 are configured through their registers so each hardware effect can be observed directly in the logs.
+This project is intentionally close to the metal. Peripheral behavior is learned and verified directly through RCC, GPIO, ADC, TIM1, and board-level signal readbacks instead of hiding the bring-up behind a high-level motor-control framework.
 ```
 
 ---
 
-### 2. GPIO / ADC board monitoring
+### 2. GPIO and dead-man control
 
 Confirmed:
 
 ```text
 PC6 LED output works.
 PC10 button input works as active-low.
+Button-held operation works as a dead-man control.
+Button release returns the drive to all-off.
+```
+
+Bring-up lesson:
+
+```text
+The button is treated as a safety input, not just a user command. Any drive routine must be written so release of the button exits to IdleAllOff quickly.
+```
+
+---
+
+### 3. ADC board monitoring
+
+Confirmed:
+
+```text
 PB12 potentiometer ADC works.
 PB14 temperature feedback ADC works.
 PA0 VBUS feedback ADC works.
-PA2/PA6/PB1 op-amp/current monitor raw ADC readings work.
+PA2 / PA6 / PB1 op-amp or current-monitor raw ADC readings work.
 ```
 
 Observed behavior:
 
 ```text
-Potentiometer controlled LED blink/log rate in earlier versions.
+Potentiometer controlled LED blink/log rate in earlier tests.
 Temperature raw value rises when the ESC board is warmed by hand.
 VBUS raw value rises when external ESC power input is raised.
-With USB/backfeed only, PA0 VBUS raw sat around the earlier baseline.
-With external bench supply raised, VBUS raw rose proportionally.
+With USB-only/backfeed, PA0 VBUS raw sits around the lower baseline.
+With bench supply raised, VBUS raw rises proportionally.
 ```
 
-Learning note:
+Bring-up lesson:
 
 ```text
-The ADC path is useful as a board-health monitor before it becomes a control input.
-VBUS and temperature were used first as sanity/safety signals, not as calibrated physical units.
+VBUS and temperature monitoring are useful safety signals even before calibrated current sensing exists. They are kept in the run logs so unsafe trends can be caught during early motor-control experiments.
 ```
 
 ---
 
-### 3. TIM1 / gate-drive command path
+### 4. TIM1 and gate-drive output bring-up
 
-Confirmed across earlier versions:
+Confirmed:
 
 ```text
-All six drive inputs can be held low.
-TIM1 can run internally.
-TIM1 alternate-function routing works.
-TIM1 CCER and MOE can be configured safely.
-Forced-inactive all-low state works after complementary polarity correction.
-Each intended gate-driver input can be commanded individually.
-Non-target drive inputs stay low during each single-output test.
+TIM1 clock enable works.
+TIM1 counter runs.
+TIM1 ARR/PSC setup works.
+TIM1 CCER command states work.
+TIM1 CCMR forced-active / forced-inactive modes work.
+TIM1 BDTR.MOE must be set before advanced-control outputs drive.
+TIM1 complementary output routing works after polarity/state correction.
 ```
 
-Known good all-off forced-low state from earlier static testing:
+Important all-off finding:
+
+```text
+Forced inactive with normal complementary polarity did not produce all six drive inputs low.
+UH/VH/WH were low, but UL/VL/WL read high.
+The corrected all-off forced-low state uses the confirmed CCER/polarity setup.
+```
+
+Known-good all-off forced-low state:
 
 ```text
 expected_ccer=3549
 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
 ```
 
-Important finding:
+Bring-up lesson:
 
 ```text
-Forced inactive with normal complementary polarity did not make all six drive inputs low.
-UH/VH/WH were low, but UL/VL/WL read high.
-The corrected all-low forced-inactive state used inverted complementary output polarity.
-```
-
-Learning note:
-
-```text
-For an advanced-control timer like TIM1, the apparent GPIO pin level depends on timer mode, output enable bits, complementary polarity, idle behavior, and MOE. Reading GPIO IDR during bring-up was useful for confirming that the commanded state reached the physical MCU pins.
+GPIO alternate-function setup alone is not enough. TIM1 advanced-control behavior depends on CCER, CCMR, BDTR, MOE, polarity, and off-state handling. Every drive state needs readback checks.
 ```
 
 ---
 
-### 4. Bootstrap-aware pulse testing
+### 5. Individual command paths
 
-Confirmed no-motor bootstrap-aware sequences:
+Low-side command paths were confirmed:
+
+```text
+UL low-side passed
+VL low-side passed
+WL low-side passed
+```
+
+Representative values:
+
+```text
+UL only: tim1_ccer=5     UH=0 UL=1 VH=0 VL=0 WH=0 WL=0
+VL only: tim1_ccer=80    UH=0 UL=0 VH=0 VL=1 WH=0 WL=0
+WL only: tim1_ccer=1280  UH=0 UL=0 VH=0 VL=0 WH=0 WL=1
+```
+
+High-side command paths were confirmed:
+
+```text
+UH high-side input command passed
+VH high-side input command passed
+WH high-side input command passed
+```
+
+Representative values:
+
+```text
+UH only: tim1_ccer=1    UH=1 UL=0 VH=0 VL=0 WH=0 WL=0
+VH only: tim1_ccer=16   UH=0 UL=0 VH=1 VL=0 WH=0 WL=0
+WH only: tim1_ccer=256  UH=0 UL=0 VH=0 VL=0 WH=1 WL=0
+```
+
+Confirmed from these tests:
+
+```text
+TIM1 register setup is working.
+TIM1 alternate-function routing is working.
+Each intended gate-driver input can be commanded individually.
+Non-target drive inputs stay low during each single-output test.
+External VBUS caused no unexpected current draw during no-motor testing.
+Board stayed cool.
+```
+
+Not directly confirmed by these tests:
+
+```text
+actual MOSFET gate voltage
+actual MOSFET switching waveform
+actual bootstrap capacitor voltage
+```
+
+---
+
+### 6. Bootstrap-aware pulse testing
+
+Confirmed no-motor U-phase sequence:
+
+```text
+all_off_before          UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+u_bootstrap_charge_ul   UH=0 UL=1 VH=0 VL=0 WH=0 WL=0
+deadtime_after_ul       UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+u_highside_command_uh   UH=1 UL=0 VH=0 VL=0 WH=0 WL=0
+all_off_cooldown        UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+```
+
+Confirmed no-motor U/V/W sequence:
 
 ```text
 UL charge -> all off -> UH command -> all off
@@ -271,7 +377,7 @@ VL charge -> all off -> VH command -> all off
 WL charge -> all off -> WH command -> all off
 ```
 
-Confirmed fields during no-motor pulse testing:
+Confirmed fields:
 
 ```text
 state_ok=1
@@ -283,217 +389,177 @@ tim1_ok=1
 cycle_ok=1
 ```
 
-External VBUS no-motor test:
+Bring-up lesson:
 
 ```text
-Motor disconnected.
-Bench supply tested up to 12 V.
-No unexpected current draw.
-Board stayed cold.
-VBUS ADC tracked the applied supply.
-```
-
-Learning note:
-
-```text
-The high-side bootstrap path had to be treated as a real board-level behavior, not just a timer setting. Early tests charged the low side first, inserted all-off deadtime, then commanded the high side.
+The high-side path needs bootstrap awareness. Early tests treated bootstrap precharge as an explicit step before moving into PWM-based operation.
 ```
 
 ---
 
-### 5. First motor-connected twitch
+### 7. First motor-connected twitch
 
-Confirmed version at that stage:
+The first motor-connected twitch test passed.
 
-```text
-v0.2.14-button-gated-u-twitch-prep
-```
-
-Firmware behavior:
+Test conditions:
 
 ```text
-Default state: all outputs off.
-Button press ran one short twitch sequence.
-After twitch: all outputs off.
-Waited for button release before allowing the next twitch.
+Small 2212 motor
+No prop
+Bench supply around 8 V
+Current-limited supply
+Button-gated single pulse
+No continuous commutation
 ```
 
 Observed result:
 
 ```text
 Each button press produced a small physical twitch/jump.
-No continuous spin was attempted at that stage.
+The firmware returned to all-off after each pulse.
 Board stayed cool.
-No abnormal behavior reported.
+No abnormal behavior was reported.
 ```
 
-Learning note:
+Representative successful vector:
 
 ```text
-The first real motor movement was intentionally a button-gated single vector. That separated gate-drive correctness from commutation timing and kept the failure energy low.
+state=twitch_drive_uh_vl
+state_ok=1
+pins_ok=1
+no_phase_overlap=1
+active_count=2
+active_count_ok=1
+tim1_ok=1
+expected_ccer=81
+tim1_ccer=81
+
+UH=1
+UL=0
+VH=0
+VL=1
+WH=0
+WL=0
+```
+
+Bring-up lesson:
+
+```text
+The static command-path tests translated into real motor actuation. This was the transition from register and pin proof to real electromechanical behavior.
 ```
 
 ---
 
-### 6. Open-loop six-step spin
+### 8. Open-loop six-step spin
 
-Later milestone:
-
-```text
-v0.2.17-deadman-fast-ramp-minimal-logging
-```
-
-Confirmed behavior:
+Current working motor-drive mode:
 
 ```text
-Small 2212 motor connected.
-No prop.
-Bench supply around 8 V.
-Current limit raised cautiously, around 250 mA during the first useful spin report.
-Motor buzzed/hummed but turned consistently all the way around.
-Rotation was jittery/not smooth.
-ESC and motor stayed cool.
+Open-loop six-step
+One high side PWM
+One low side held on
+One phase floating
+Button held to run
+Button released to stop
 ```
 
-Control style:
-
-```text
-Open-loop six-step.
-One high side PWMing.
-One low side held on.
-One phase floating.
-Button release returns immediately to all-off.
-```
-
-Learning note:
-
-```text
-Six-step open-loop can prove the timer/gate-driver/motor path, but it produces torque ripple and can slip if the commanded electrical ramp outruns the rotor. The audible buzz during faster tests is expected from six-step torque ripple, open-loop sync behavior, or logging/timing disturbance, not necessarily from the PWM carrier.
-```
-
----
-
-### 7. PWM carrier raised to about 20 kHz
-
-Current TIM1 PWM setup uses:
-
-```text
-TIM1_TEST_PSC = 0
-TIM1_TEST_ARR = 799
-```
-
-With the default HSI16 timer clock assumption:
-
-```text
-16 MHz / 800 = about 20 kHz
-```
-
-Result:
-
-```text
-The PWM carrier itself moved above the main audible range.
-Remaining buzz is more likely six-step commutation torque ripple, open-loop slip/catch behavior, or test/log timing effects.
-```
-
-Learning note:
-
-```text
-PWM carrier frequency and commutation frequency are separate. Raising the carrier to 20 kHz does not remove the lower-frequency torque ripple caused by six-step commutation.
-```
-
----
-
-### 8. BEMF observe added
-
-Current confirmed baseline:
+Current milestone:
 
 ```text
 v0.4.0-bemf-observe-openloop
 ```
 
-Purpose:
+Confirmed behavior:
 
 ```text
-Keep the motor drive open-loop.
-Add BEMF observation only.
-Do not use BEMF to decide commutation yet.
+The motor can rotate continuously in open loop.
+At low current it buzzed/hummed and turned slowly/jittery.
+Raising bench current limit improved the ability to follow the commutation.
+At higher commanded speed, BEMF readings became more visible.
+Board and motor stayed cool in the reported tests.
 ```
 
-Current BEMF behavior:
+PWM carrier:
 
 ```text
-The code samples the expected floating phase during each six-step vector.
-Logs include b0, b1, b2, b3 samples per step.
-At low speed or poor sync, readings can be weak or zero.
-At higher RPM, BEMF-like readings appear on some phases.
-The waveform is not yet clean/reliable enough for closed-loop commutation.
+TIM1 ARR = 799
+Default HSI16 timer clock assumption gives about 20 kHz PWM carrier.
+The audible buzz heard during recent tests is more likely six-step torque ripple, open-loop slip/catch behavior, logging/timing disturbance, or bench-supply current limiting, not the 20 kHz PWM carrier itself.
 ```
 
-Learning note:
+Bring-up lesson:
 
 ```text
-Six-step naturally provides a floating phase, which makes BEMF observation practical. Sinusoidal/SPWM usually drives all three phases, so the present floating-phase BEMF method will not directly carry over to the sine test.
+Six-step is useful for first motion because one phase naturally floats and can be sampled for BEMF. It is also mechanically rough, especially during open-loop startup and low-speed operation.
 ```
 
 ---
 
-## Current safety behavior
+### 9. BEMF observation
 
-Current firmware keeps these safety assumptions:
+Current BEMF mode:
 
 ```text
-No prop.
-Low voltage first.
-Current-limited bench supply.
-Button held = run.
-Button released = immediate all-off.
-Temperature delta monitored.
-ADC timeout monitored.
-No same-phase high/low overlap check.
-Startup and fault logging retained.
+Observe only
+No closed-loop commutation
+Floating phase selected from the six-step vector
+Four ADC samples logged as b0..b3
 ```
 
-Current health-style fields seen in run logs:
+Observed behavior:
 
 ```text
-health_ok
-af_ok
-no_phase_overlap
-timeout
-temp_delta
-temp_ok
-vbus_raw
-vbus_delta
+BEMF-like readings appear more clearly once the motor reaches some RPM.
+Some phase/sample combinations still read zero or are not phase-clean.
+The signal path appears alive, but the current sampling strategy is not ready to close the loop.
 ```
 
-Important limitation:
+Current interpretation:
 
 ```text
-health_ok does not prove the rotor is synchronized.
-It only proves the deterministic electrical/safety checks passed.
+The BEMF path is useful for learning and instrumentation.
+The sampling method needs cleanup before it is trusted for zero-cross commutation.
+The next six-step/BEMF improvement would log all three BEMF channels per vector to verify mapping and waveform behavior.
+```
+
+Bring-up lesson:
+
+```text
+BEMF sensing is coupled to the drive strategy. Six-step leaves a floating phase. Sine/SPWM generally drives all three phases, so the existing floating-phase BEMF method is not directly transferable to the sine test.
 ```
 
 ---
 
 ## Current status
 
-```text
-The project has moved from static pin proof, to first twitch, to open-loop six-step spin, to BEMF observation.
-The current monolithic v0.4.0 firmware is a useful baseline before restructuring.
-```
-
-Current working baseline:
+Current baseline:
 
 ```text
-src/main.rs
 v0.4.0-bemf-observe-openloop
 ```
 
-Current repository step completed before this README update:
+The project currently has a working monolithic firmware file that can:
 
 ```text
-Cargo.toml was updated to match v0.4.0-bemf-observe-openloop.
-The monolithic baseline was pushed before the split work begins.
+initialize STM32G431 clocks and peripherals directly
+configure GPIO, analog pins, and TIM1 alternate functions
+monitor VBUS and temperature through ADC
+verify drive-pin and TIM1 safety state
+command open-loop six-step PWM motor drive
+observe floating-phase BEMF during six-step operation
+stop on button release
+log status through RTT
+```
+
+Current safety state from recent logs:
+
+```text
+health_ok=1
+af_ok=1
+no_phase_overlap=1
+timeout=0
+temperature delta remained below abort threshold
+runs stopped because of max_steps or button release, not a detected electrical fault
 ```
 
 ---
@@ -501,74 +567,82 @@ The monolithic baseline was pushed before the split work begins.
 ## What is still not confirmed
 
 ```text
-actual MOSFET gate voltage
-actual high-side bootstrap voltage under fast PWM load
-phase-node switching waveform
-calibrated motor current
-dead-time margin under real PWM with higher current
-reliable sensorless zero-cross timing
-closed-loop commutation stability
-open-loop sine/SPWM behavior on this board
-thermal behavior under repeated or longer drive
+calibrated motor phase current
+actual MOSFET gate waveform under PWM
+actual high-side bootstrap voltage under continuous PWM
+phase-node switching waveform on a scope
+dead-time margin under higher current
+closed-loop six-step commutation
+sensorless zero-cross reliability
+sinusoidal/SPWM behavior on this board
+FOC current-loop behavior
+thermal behavior under sustained higher-power operation
 ```
 
-A scope or current probe would be useful before aggressive PWM, higher bus voltage, or closed-loop experiments.
+A scope is still useful before aggressive PWM, higher current, closed-loop commutation, or FOC work.
 
 ---
 
-## Next immediate step: refactor-only split
+## Immediate next step: split the monolithic file
 
-The next step is not a behavior change.
-
-Goal:
-
-```text
-Split the current working monolithic v0.4.0 main.rs into modules.
-Preserve existing six-step + BEMF observe behavior.
-Build and test the split version the same way as the monolithic version.
-```
-
-Proposed split:
-
-```text
-src/main.rs        startup, main loop, run selection
-src/regs.rs        raw register addresses and bit constants
-src/gpio.rs        pin modes, AF setup, LED, button, drive pin readback
-src/adc.rs         ADC1/ADC2 setup and board monitor reads
-src/tim1.rs        TIM1 setup, PWM/CCER/BDTR helpers
-src/drive.rs       DriveState, six-step states, apply_state/apply_pwm_vector
-src/safety.rs      overlap/temp/button/health helpers
-src/bemf.rs        floating-phase BEMF observe helpers
-src/sixstep.rs     current open-loop six-step ramp
-src/log.rs         RTT log formatting helpers
-```
-
-Expected version for the split milestone:
+The next code step is:
 
 ```text
 v0.4.1-split-same-behavior
 ```
 
-Refactor rule:
+Goal:
 
 ```text
-No sine code in the first split.
-No closed-loop behavior in the first split.
-No pin remapping in the first split.
-No safety behavior removal in the first split.
+Split src/main.rs into focused modules without changing behavior.
 ```
 
-Learning-note rule for rewritten files:
+Rules for the split:
 
 ```text
-Each rewritten module should include practical bring-up notes explaining what was learned from the board and why that subsystem is structured the way it is.
+No behavior change.
+Keep the current six-step + BEMF observe path intact.
+Keep the same button dead-man behavior.
+Keep the same startup checks and safety logging.
+Keep the same motor-test behavior.
+Keep BEMF observation as-is for the first split.
+Do not add sine control in the split commit.
 ```
+
+Expected files:
+
+```text
+src/main.rs
+src/regs.rs
+src/gpio.rs
+src/adc.rs
+src/tim1.rs
+src/drive.rs
+src/bemf.rs
+src/sixstep.rs
+src/log.rs
+src/safety.rs
+```
+
+Purpose of the split:
+
+```text
+Make the code easier to inspect and test.
+Keep raw register definitions isolated.
+Keep board pin setup isolated.
+Keep ADC monitor code isolated.
+Keep TIM1 PWM/output control isolated.
+Keep six-step and BEMF logic separate.
+Prepare for sine/SPWM and later FOC without mixing strategies.
+```
+
+The split files should include practical bring-up notes about what was learned from the board, especially where the lesson affects future maintenance or safety.
 
 ---
 
 ## Next control experiment after split: open-loop sine/SPWM
 
-After the split version builds and behaves the same, the next experimental branch is:
+Planned milestone:
 
 ```text
 v0.5.0-openloop-sine-spwm
@@ -577,47 +651,81 @@ v0.5.0-openloop-sine-spwm
 Goal:
 
 ```text
-Test smoother open-loop sinusoidal phase drive before attempting FOC.
+Test smoother open-loop sinusoidal phase-voltage control.
 ```
 
-Expected control style:
+Expected approach:
 
 ```text
-TIM1 carrier remains around 20 kHz.
-U/V/W PWM duties are updated from a sine table.
-Three phases are 120 electrical degrees apart.
-Open-loop electrical angle advances with a ramp.
-Amplitude ramps cautiously.
-Button dead-man remains active.
-VBUS/temp monitoring remains active.
-BEMF observe disabled for the first sine test.
+Keep TIM1 PWM carrier around 20 kHz.
+Enable PWM on U, V, and W.
+Use a sine lookup table or equivalent phase-duty generator.
+Drive U/V/W 120 electrical degrees apart.
+Advance electrical angle open-loop.
+Ramp amplitude and electrical speed conservatively.
+Keep button dead-man.
+Keep VBUS and temperature monitoring.
+Disable current BEMF logging during the first sine test.
 ```
 
-Important tradeoff:
+Expected benefit:
 
 ```text
-Six-step leaves one phase floating, which helps BEMF observation.
-Sinusoidal/SPWM drives all three phases, so the current floating-phase BEMF method is not the right first feedback path.
+Smoother commanded phase voltages than six-step.
+Less hard vector-to-vector torque ripple.
+Better learning step toward FOC.
 ```
 
-Later path toward FOC:
+Important limitation:
 
 ```text
-GPIO / ADC / TIM1 bring-up
--> static drive-vector proof
--> first motor twitch
--> open-loop six-step
--> six-step + BEMF observe
--> refactor-only split
--> open-loop sine/SPWM
--> later current sensing / rotor-angle estimate / FOC experiments
+Open-loop sine is not FOC.
+Open-loop sine does not know rotor angle.
+It can still slip if the ramp is too aggressive.
+FOC requires rotor angle estimation or sensing, current feedback, transforms, and current-loop control.
+```
+
+---
+
+## Longer-term path toward FOC
+
+Likely development sequence:
+
+```text
+v0.4.1 split same behavior
+v0.5.0 open-loop sine/SPWM
+v0.5.x sine tuning and safety cleanup
+v0.6.x current monitor calibration
+v0.7.x structured motor-control timing
+v0.8.x rotor-angle estimation experiments
+v0.9.x first closed-loop current-control experiments
+```
+
+FOC-oriented modules later may include:
+
+```text
+foc.rs
+clarke_park.rs
+current.rs
+svpwm.rs
+observer.rs
+motor_params.rs
+```
+
+Design principle:
+
+```text
+Keep control strategies separated:
+sixstep.rs for six-step tests
+sine.rs for open-loop sinusoidal/SPWM tests
+foc.rs for later current-oriented control
 ```
 
 ---
 
 ## Commit/tag convention
 
-Use version tags matching the tested firmware milestone, for example:
+Use version tags matching tested firmware milestones, for example:
 
 ```text
 v0.4.0-bemf-observe-openloop
@@ -628,62 +736,19 @@ v0.5.0-openloop-sine-spwm
 Recommended baseline commit before split:
 
 ```bash
-git status
 git add Cargo.toml README.md src/main.rs
-git commit -m "Save monolithic BEMF observe open-loop baseline"
-git tag v0.4.0-bemf-observe-openloop
+git commit -m "Save v0.4.0 BEMF observe open-loop baseline"
+git tag -a v0.4.0-bemf-observe-openloop -m "BEMF observe open-loop baseline"
 git push
 git push origin v0.4.0-bemf-observe-openloop
 ```
 
-For the README-only update after the baseline push:
+Recommended split commit later:
 
 ```bash
-git status
-git add README.md
-git commit -m "Update README for BEMF observe baseline and split plan"
+git add src
+git commit -m "Split v0.4.0 ESC bring-up firmware into modules"
+git tag -a v0.4.1-split-same-behavior -m "Split firmware into modules without behavior change"
 git push
-```
-
----
-
-## Status summary
-
-Passed milestones:
-
-```text
-v0.2.6-fix2 UL low-side passed
-v0.2.7 VL low-side passed
-v0.2.8 WL low-side passed
-
-v0.2.9 UH high-side input-command passed
-v0.2.10 VH high-side input-command passed
-v0.2.11 WH high-side input-command passed
-
-v0.2.12 U-phase bootstrap-aware no-motor pulse passed
-v0.2.13 all-phases bootstrap-aware no-motor pulse passed
-
-v0.2.14 button-gated UH+VL first motor twitch passed
-v0.2.17 dead-man open-loop slow spin passed
-
-v0.3.x PWM six-step ramp with about 20 kHz carrier tested
-v0.4.0 BEMF observe added while keeping loop open
-```
-
-Current milestone:
-
-```text
-v0.4.0-bemf-observe-openloop
-```
-
-Next milestone:
-
-```text
-v0.4.1-split-same-behavior
-```
-
-Next control milestone after split:
-
-```text
-v0.5.0-openloop-sine-spwm
+git push origin v0.4.1-split-same-behavior
 ```
