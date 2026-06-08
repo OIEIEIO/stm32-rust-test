@@ -19,7 +19,7 @@
 
 [package]
 name = "b-g431b-esc1-rust"
-version = "0.5.2-openloop-sine-96-fast-loop"
+version = "0.5.24-warning-cleanup"
 edition = "2024"
 
 [dependencies]

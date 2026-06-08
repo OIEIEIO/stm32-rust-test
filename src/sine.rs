@@ -1,38 +1,47 @@
 // ================================================================
 // File: sine.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/sine.rs
-// Version: v0.5.2-openloop-sine-96-fast-loop
-// Purpose: Open-loop sine/SPWM runner for the B-G431B-ESC1
-//          STM32G431CB Rust motor-control bring-up.
+// Version: v0.5.23-op3v-regular-naming
+// Purpose: Open-loop sine/SPWM runner with compact TIM1-triggered
+//          injected ADC FOC-prep current sample output plus empirical
+//          OPAMP-to-command phase-mapping fields, OP3/VOPAMP3 regular
+//          ADC diagnostic naming, and end-of-run compact sector summaries
+//          for the B-G431B-ESC1 STM32G431CB Rust motor-control bring-up.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 //
-// Change summary vs v0.5.1:
-//   - Keeps the 96-step Q10 sine table.
-//   - Keeps dead-man-button behavior unchanged.
-//   - Keeps the same amplitude/ramp constants from regs.rs.
-//   - Moves heavy ADC/TIM1/drive health checks out of every sine step.
-//   - Fast loop now writes CCR1/CCR2/CCR3 directly.
-//   - Health/readback/logging happens every SINE_HEALTH_EVERY_STEPS.
-//   - Goal: higher RPM while preserving the much quieter 96-step waveform.
+// Change summary vs v0.5.22:
+//   - Renames OP3/VOPAMP3 log labels to make clear that this path is a
+//     regular ADC diagnostic read, not an injected ADC sample.
+//   - focmap log label cleanup:
+//       op1_i      -> op1_delta
+//       op2_i      -> op2_delta
+//       op3v_jraw  -> op3v_regular_raw
+//       op3v_i     -> op3v_regular_delta
+//       op3v_valid -> op3v_regular_valid
+//   - focsum compact labels now use explicit avg/count wording.
+//   - No drive, TIM1, ADC setup, sampling timing, or control behavior change.
+//
+// Change summary vs v0.5.21:
+//   - Adds OP3/VOPAMP3 diagnostic fields to focmap, sine heartbeat, and
+//     compact end-of-run sector summaries.
+//   - Keeps the default injected pair unchanged: ADC1=OP1, ADC2=OP2.
+//   - OP3/VOPAMP3 is logged as diagnostic-only data; it is not used for
+//     phase-current reconstruction or control output.
+//   - No intended motor-drive behavior change.
 //
 // Behavior:
 //   - Button released: all outputs off.
 //   - Button held: bootstrap precharge -> fixed sine alignment ->
 //     open-loop sine/SPWM electrical-angle ramp.
 //   - Release button: all-off.
-//   - No pot control yet.
-//   - No BEMF decision logic.
-//   - No FOC.
-//   - No SVPWM.
-//   - No closed loop.
+//   - Current sampling is observation-only.
 //
 // Learning notes:
-//   - The 96-step table made the motor much quieter and smoother.
-//   - The previous per-step health/readback loop dominated timing.
-//   - This version separates:
-//       fast path: CCR update + button check + delay
-//       slow path: ADC/TIM1/drive readback + log
-//   - This is still open-loop. The rotor is not measured.
+//   - v0.5.14 proved injected ADC completion (`JEOS`) for both software
+//     start and TIM1_CH4-triggered start.
+//   - v0.5.15 turned that proof into a repeatable FOC-prep sample log.
+//   - v0.5.23 keeps OP1/OP2 as the injected pair and labels OP3/VOPAMP3
+//     correctly as a regular ADC diagnostic read.
 // ================================================================
 
 use core::ptr::write_volatile;
@@ -41,6 +50,15 @@ use cortex_m::asm;
 use rtt_target::rprintln;
 
 use crate::adc::{adc_delta, read_adc_snapshot, AdcSnapshot};
+use crate::current_sense::{
+    read_foc_prep_sample,
+    signed_count_abs,
+    signed_count_diff,
+    signed_count_sign,
+    update_foc_sector_summary,
+    CurrentSenseOffsets,
+    FocSectorSummary,
+};
 use crate::drive::{no_phase_overlap, read_drive, DriveState};
 use crate::gpio::button_pressed;
 use crate::log::log_state;
@@ -56,6 +74,12 @@ use crate::tim1::{
 // Heavy health/readback interval.
 // With a 96-step table, 960 steps = 10 electrical revolutions.
 const SINE_HEALTH_EVERY_STEPS: u32 = 960;
+
+// Phase-map observation interval.
+// 257 is intentionally not a multiple of SINE_TABLE_LEN=96. This lets
+// the `focmap` line walk across different electrical phase indices while
+// leaving the slower health heartbeat cadence unchanged.
+const FOCMAP_SAMPLE_EVERY_STEPS: u32 = 257;
 
 // 96-entry sine table, Q10 scale.
 // Full scale = +/-1024.
@@ -107,6 +131,70 @@ fn sine_duties_for_index(phase_index: usize, amplitude: u32) -> (u32, u32, u32) 
     )
 }
 
+fn sine_refs_q10_for_index(phase_index: usize) -> (i32, i32, i32) {
+    let u_index = phase_index % SINE_TABLE_LEN;
+    let v_index = (u_index + ((SINE_TABLE_LEN * 2) / 3)) % SINE_TABLE_LEN;
+    let w_index = (u_index + (SINE_TABLE_LEN / 3)) % SINE_TABLE_LEN;
+
+    (
+        SINE_Q10[u_index] as i32,
+        SINE_Q10[v_index] as i32,
+        SINE_Q10[w_index] as i32,
+    )
+}
+
+fn phase_theta_x10(phase_index: usize) -> u32 {
+    ((phase_index as u32) * 3600) / (SINE_TABLE_LEN as u32)
+}
+
+fn phase_sector_60(phase_index: usize) -> u32 {
+    ((phase_index as u32) * 6) / (SINE_TABLE_LEN as u32)
+}
+
+fn abs_i32(value: i32) -> i32 {
+    if value < 0 {
+        -value
+    } else {
+        value
+    }
+}
+
+fn ref_sign(value: i32) -> i32 {
+    if value > 0 {
+        1
+    } else if value < 0 {
+        -1
+    } else {
+        0
+    }
+}
+
+fn dominant_ref_label(ref_u: i32, ref_v: i32, ref_w: i32) -> &'static str {
+    let au = abs_i32(ref_u);
+    let av = abs_i32(ref_v);
+    let aw = abs_i32(ref_w);
+
+    if au >= av && au >= aw {
+        "u"
+    } else if av >= au && av >= aw {
+        "v"
+    } else {
+        "w"
+    }
+}
+
+fn dominant_ref_sign(ref_u: i32, ref_v: i32, ref_w: i32) -> i32 {
+    let label = dominant_ref_label(ref_u, ref_v, ref_w);
+
+    if label == "u" {
+        ref_sign(ref_u)
+    } else if label == "v" {
+        ref_sign(ref_v)
+    } else {
+        ref_sign(ref_w)
+    }
+}
+
 fn apply_sine_pwm_uvw_fast(u_duty: u32, v_duty: u32, w_duty: u32) {
     unsafe {
         write_volatile(TIM1_CCR1, u_duty);
@@ -143,6 +231,162 @@ fn sine_amplitude_for_rev(electrical_rev: u32) -> u32 {
     }
 }
 
+fn log_focmap_sample(
+    run_id: u32,
+    step_index: u32,
+    electrical_rev: u32,
+    phase_index: usize,
+    step_delay: u32,
+    amplitude: u32,
+    u_duty: u32,
+    v_duty: u32,
+    w_duty: u32,
+    baseline: AdcSnapshot,
+    current_offsets: CurrentSenseOffsets,
+) -> crate::current_sense::FocPrepSample {
+    let adc = read_adc_snapshot();
+    let foc = read_foc_prep_sample(current_offsets);
+
+    let (ref_u, ref_v, ref_w) = sine_refs_q10_for_index(phase_index);
+    let theta_x10 = phase_theta_x10(phase_index);
+    let sector60 = phase_sector_60(phase_index);
+    let dom = dominant_ref_label(ref_u, ref_v, ref_w);
+    let dom_s = dominant_ref_sign(ref_u, ref_v, ref_w);
+
+    let op1_s = signed_count_sign(foc.op1_delta);
+    let op2_s = signed_count_sign(foc.op2_delta);
+    let op1_abs = signed_count_abs(foc.op1_delta);
+    let op2_abs = signed_count_abs(foc.op2_delta);
+    let op12_diff = signed_count_diff(foc.op1_delta, foc.op2_delta);
+
+    let op3v_regular_s = signed_count_sign(foc.op3_vopamp3_delta);
+    let op3v_regular_abs = signed_count_abs(foc.op3_vopamp3_delta);
+
+    rprintln!(
+        "focmap run={} step={} erev={} phase_idx={} theta_x10={} sector60={} ok={} trig=tim1_ch4_center injected_pair=adc1_op1_adc2_op2 op3v_regular_path=adc2_in18 target={} wait={} cnt_a={} cnt_b={} jeoc1={} jeos1={} jeoc2={} jeos2={} to={} rail={} ref_u={} ref_v={} ref_w={} dom={} dom_s={} op1_jraw={} op1_delta={} op1_s={} op1_abs={} op2_jraw={} op2_delta={} op2_s={} op2_abs={} op3v_regular_raw={} op3v_regular_delta={} op3v_regular_s={} op3v_regular_abs={} op3v_regular_valid={} op12_diff={} isum2={} vbus_raw={} vbus_delta={} temp_raw={} u={} v={} w={} amp={} delay={}",
+        run_id,
+        step_index,
+        electrical_rev,
+        phase_index,
+        theta_x10,
+        sector60,
+        foc.ok,
+        foc.target_cnt,
+        foc.wait_loops,
+        foc.cnt_before_arm,
+        foc.cnt_after_read,
+        foc.adc1_jeoc,
+        foc.adc1_jeos,
+        foc.adc2_jeoc,
+        foc.adc2_jeos,
+        foc.timeout,
+        foc.near_high_rail,
+        ref_u,
+        ref_v,
+        ref_w,
+        dom,
+        dom_s,
+        foc.op1_raw,
+        foc.op1_delta,
+        op1_s,
+        op1_abs,
+        foc.op2_raw,
+        foc.op2_delta,
+        op2_s,
+        op2_abs,
+        foc.op3_vopamp3_raw,
+        foc.op3_vopamp3_delta,
+        op3v_regular_s,
+        op3v_regular_abs,
+        foc.op3_vopamp3_valid,
+        op12_diff,
+        foc.op_sum2,
+        adc.vbus_raw,
+        adc_delta(adc.vbus_raw, baseline.vbus_raw),
+        adc.temp_raw,
+        u_duty,
+        v_duty,
+        w_duty,
+        amplitude,
+        step_delay
+    );
+
+    if foc.ok != 1 {
+        rprintln!(
+            "focdbg run={} step={} isr1=0x{:08x} isr2=0x{:08x} jsqr1=0x{:08x} jsqr2=0x{:08x}",
+            run_id,
+            step_index,
+            foc.adc1_isr,
+            foc.adc2_isr,
+            foc.adc1_jsqr,
+            foc.adc2_jsqr
+        );
+    }
+
+    foc
+}
+
+fn log_foc_sector_summaries(run_id: u32, summaries: &[FocSectorSummary; 6]) {
+    let s0 = summaries[0];
+    let s1 = summaries[1];
+    let s2 = summaries[2];
+    let s3 = summaries[3];
+    let s4 = summaries[4];
+    let s5 = summaries[5];
+
+    rprintln!(
+        "focsum_a run={} s0_samples={} s0_ok_samples={} s0_op1_avg={} s0_op2_avg={} s0_op3v_regular_samples={} s0_op3v_regular_avg={} s0_isum2_avg={} s1_samples={} s1_ok_samples={} s1_op1_avg={} s1_op2_avg={} s1_op3v_regular_samples={} s1_op3v_regular_avg={} s1_isum2_avg={} s2_samples={} s2_ok_samples={} s2_op1_avg={} s2_op2_avg={} s2_op3v_regular_samples={} s2_op3v_regular_avg={} s2_isum2_avg={}",
+        run_id,
+        s0.samples,
+        s0.ok_samples,
+        s0.op1_avg(),
+        s0.op2_avg(),
+        s0.op3_vopamp3_samples,
+        s0.op3_vopamp3_avg(),
+        s0.isum2_avg(),
+        s1.samples,
+        s1.ok_samples,
+        s1.op1_avg(),
+        s1.op2_avg(),
+        s1.op3_vopamp3_samples,
+        s1.op3_vopamp3_avg(),
+        s1.isum2_avg(),
+        s2.samples,
+        s2.ok_samples,
+        s2.op1_avg(),
+        s2.op2_avg(),
+        s2.op3_vopamp3_samples,
+        s2.op3_vopamp3_avg(),
+        s2.isum2_avg()
+    );
+
+    rprintln!(
+        "focsum_b run={} s3_samples={} s3_ok_samples={} s3_op1_avg={} s3_op2_avg={} s3_op3v_regular_samples={} s3_op3v_regular_avg={} s3_isum2_avg={} s4_samples={} s4_ok_samples={} s4_op1_avg={} s4_op2_avg={} s4_op3v_regular_samples={} s4_op3v_regular_avg={} s4_isum2_avg={} s5_samples={} s5_ok_samples={} s5_op1_avg={} s5_op2_avg={} s5_op3v_regular_samples={} s5_op3v_regular_avg={} s5_isum2_avg={}",
+        run_id,
+        s3.samples,
+        s3.ok_samples,
+        s3.op1_avg(),
+        s3.op2_avg(),
+        s3.op3_vopamp3_samples,
+        s3.op3_vopamp3_avg(),
+        s3.isum2_avg(),
+        s4.samples,
+        s4.ok_samples,
+        s4.op1_avg(),
+        s4.op2_avg(),
+        s4.op3_vopamp3_samples,
+        s4.op3_vopamp3_avg(),
+        s4.isum2_avg(),
+        s5.samples,
+        s5.ok_samples,
+        s5.op1_avg(),
+        s5.op2_avg(),
+        s5.op3_vopamp3_samples,
+        s5.op3_vopamp3_avg(),
+        s5.isum2_avg()
+    );
+}
+
 fn log_sine_health(
     run_id: u32,
     step_index: u32,
@@ -154,6 +398,7 @@ fn log_sine_health(
     v_duty: u32,
     w_duty: u32,
     baseline: AdcSnapshot,
+    current_offsets: CurrentSenseOffsets,
     force_log: bool,
 ) -> u32 {
     let drive = read_drive();
@@ -176,8 +421,10 @@ fn log_sine_health(
     };
 
     if force_log || health_ok != 1 || (step_index % SINE_LOG_EVERY_STEPS) == 0 {
+        let foc = read_foc_prep_sample(current_offsets);
+
         rprintln!(
-            "sine run={} step={} erev={} phase_idx={} delay={} amp={} u={} v={} w={} health_ok={} button={} af_ok={} no_phase_overlap={} tim1_sine_ok={} ccer_ok={} pwm_modes_ok={} moe={} deadtime={} ccr1={} ccr2={} ccr3={} UH={} UL={} VH={} VL={} WH={} WL={} vbus_raw={} vbus_delta={} temp_raw={} temp_delta={} temp_ok={} pot_raw={} timeout={}",
+            "sine run={} step={} erev={} phase_idx={} delay={} amp={} u={} v={} w={} health_ok={} button={} af_ok={} no_phase_overlap={} tim1_sine_ok={} ccer_ok={} pwm_modes_ok={} moe={} dt={} ccr1={} ccr2={} ccr3={} vbus_raw={} vbus_delta={} temp_raw={} temp_delta={} temp_ok={} pot_raw={} foc_ok={} op3v_regular_valid={} op3v_regular_delta={} timeout={}",
             run_id,
             step_index,
             electrical_rev,
@@ -199,28 +446,37 @@ fn log_sine_health(
             tim1.ccr1,
             tim1.ccr2,
             tim1.ccr3,
-            drive.uh_pin,
-            drive.ul_pin,
-            drive.vh_pin,
-            drive.vl_pin,
-            drive.wh_pin,
-            drive.wl_pin,
             adc.vbus_raw,
             adc_delta(adc.vbus_raw, baseline.vbus_raw),
             adc.temp_raw,
             temp_delta,
             temp_ok,
             adc.pot_raw,
+            foc.ok,
+            foc.op3_vopamp3_valid,
+            foc.op3_vopamp3_delta,
             adc.timeout
         );
+
+        if foc.ok != 1 {
+            rprintln!(
+                "focdbg run={} step={} isr1=0x{:08x} isr2=0x{:08x} jsqr1=0x{:08x} jsqr2=0x{:08x}",
+                run_id,
+                step_index,
+                foc.adc1_isr,
+                foc.adc2_isr,
+                foc.adc1_jsqr,
+                foc.adc2_jsqr
+            );
+        }
     }
 
     health_ok
 }
 
-pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
+pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot, current_offsets: CurrentSenseOffsets) {
     rprintln!(
-        "sine_run_start run={} hold_button_to_run release_to_stop center={} min={} max={} start_amp={} max_amp={} amp_inc_per_erev={} table_len={} align_hold={} start_delay={} min_delay={} dec_per_erev={} max_steps={} log_every={} health_every={}",
+        "sine_run_start run={} hold_button_to_run release_to_stop center={} min={} max={} start_amp={} max_amp={} amp_inc_per_erev={} table_len={} align_hold={} start_delay={} min_delay={} dec_per_erev={} max_steps={} log_every={} health_every={} focmap_every={} focmap=tim1_ch4_adc1_op1_adc2_op2_plus_op3v_regular_adc_diag focsum=end_of_run_compact_sector_summary",
         run_id,
         SINE_PWM_CENTER,
         SINE_PWM_MIN_DUTY,
@@ -235,7 +491,8 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
         SINE_DECREMENT_PER_ELECTRICAL_REV,
         SINE_MAX_STEPS_PER_HOLD,
         SINE_LOG_EVERY_STEPS,
-        SINE_HEALTH_EVERY_STEPS
+        SINE_HEALTH_EVERY_STEPS,
+        FOCMAP_SAMPLE_EVERY_STEPS
     );
 
     apply_state(DriveState::BootstrapUL);
@@ -273,7 +530,22 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
         v_align,
         w_align,
         baseline,
+        current_offsets,
         true,
+    );
+
+    log_focmap_sample(
+        run_id,
+        0,
+        0,
+        0,
+        SINE_ALIGN_HOLD_DELAY,
+        SINE_PWM_START_AMPLITUDE,
+        u_align,
+        v_align,
+        w_align,
+        baseline,
+        current_offsets,
     );
 
     if align_health != 1 {
@@ -296,6 +568,7 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
     let mut last_u: u32 = u_align;
     let mut last_v: u32 = v_align;
     let mut last_w: u32 = w_align;
+    let mut sector_summaries = [FocSectorSummary::new(); 6];
 
     while button_pressed() && sine_steps < SINE_MAX_STEPS_PER_HOLD {
         let phase_index = (sine_steps % (SINE_TABLE_LEN as u32)) as usize;
@@ -335,6 +608,7 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
                 v_duty,
                 w_duty,
                 baseline,
+                current_offsets,
                 false,
             );
 
@@ -342,6 +616,25 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
                 cycle_ok = 0;
                 break;
             }
+        }
+
+        if (sine_steps % FOCMAP_SAMPLE_EVERY_STEPS) == 0 {
+            let foc = log_focmap_sample(
+                run_id,
+                sine_steps,
+                electrical_rev,
+                phase_index,
+                step_delay,
+                amplitude,
+                u_duty,
+                v_duty,
+                w_duty,
+                baseline,
+                current_offsets,
+            );
+
+            let sector = phase_sector_60(phase_index) as usize;
+            update_foc_sector_summary(&mut sector_summaries[sector], foc);
         }
     }
 
@@ -371,6 +664,8 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
         last_w
     );
 
+    log_foc_sector_summaries(run_id, &sector_summaries);
+
     if cycle_ok == 0 {
         apply_state(DriveState::FaultAllOff);
         log_state(run_id, 9998, 0, 0, DriveState::FaultAllOff, baseline);
@@ -383,7 +678,7 @@ pub fn run_sine_openloop(run_id: u32, baseline: AdcSnapshot) {
 // Footer
 // File: sine.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/sine.rs
-// Version: v0.5.2-openloop-sine-96-fast-loop
-// Created: 2026-06-07
-// Generated timestamp: 2026-06-07T00:00:00Z
+// Version: v0.5.23-op3v-regular-naming
+// Created: 2026-06-08
+// Generated timestamp: 2026-06-08T16:40:00Z
 // ================================================================

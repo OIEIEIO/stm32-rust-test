@@ -1,9 +1,15 @@
 // ================================================================
 // File: adc.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/adc.rs
-// Version: v0.4.5-split-adc-same-behavior
+// Version: v0.5.8-tim1-ch4-injected-pair-sample
 // Purpose: ADC setup and raw board-monitor/BEMF-channel read helpers
 //          for the STM32G431CB B-G431B-ESC1 bring-up firmware.
+//
+// Change summary vs v0.4.5:
+//   - Sets ADC_CFGR_JQDIS during ADC setup, before ADC enable, so later
+//     TIM1_CH4-triggered injected current-sense testing can use a direct
+//     JSQR context without writing CFGR after the ADC is enabled.
+//   - Regular polling reads remain unchanged.
 //
 // Learning notes:
 //   - ADC1 is used for board monitor channels: pot, temp, VBUS, OP1, OP3.
@@ -178,7 +184,7 @@ pub fn setup_single_adc(adc_base: usize) -> u32 {
 
         asm::delay(160_000);
 
-        write_volatile(adc_cfgr(adc_base), 0);
+        write_volatile(adc_cfgr(adc_base), ADC_CFGR_JQDIS);
 
         let cr_before_cal = read_volatile(adc_cr(adc_base));
         write_volatile(adc_cr(adc_base), cr_before_cal | ADC_CR_ADCAL);
@@ -260,7 +266,7 @@ pub fn setup_adc_for_board_monitor() -> (u32, u32) {
 }
 // ================================================================
 // End of file: adc.rs
-// Version: v0.4.5-split-adc-same-behavior
-// Generated: 2026-06-07
+// Version: v0.5.8-tim1-ch4-injected-pair-sample
+// Generated: 2026-06-08
 // Creation date: 2026-06-07
 // ================================================================

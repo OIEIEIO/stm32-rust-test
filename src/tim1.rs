@@ -1,12 +1,20 @@
 // ================================================================
 // File: tim1.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/tim1.rs
-// Version: v0.5.2-openloop-sine-96-fast-loop
+// Version: v0.5.13-preserve-ch4-ocref
 // Purpose: TIM1 setup, forced-output state application, six-step PWM
 //          vector application, sine/SPWM complementary PWM helpers,
 //          and TIM1 readback verification for the B-G431B-ESC1
 //          STM32G431CB Rust motor-control bring-up.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
+//
+// Change summary vs v0.5.12 injected-debug branch:
+//   - Adds configure_tim1_ch4_current_sense_trigger().
+//   - Preserves TIM1_CCMR2 CH4 output-compare/reference bits whenever
+//     CH3 sine/forced mode is rewritten. This directly addresses the
+//     observed log result where ch4 cc4if=1 but ccmr2 stayed 0x00000060.
+//   - Keeps CH4 external output disabled; CH4 is internal trigger/debug only.
+//   - No intended motor-drive behavior change for CH1/2/3 complementary PWM.
 //
 // Change summary vs v0.5.0:
 //   - Version string unified to the v0.5.2 baseline.
@@ -55,6 +63,13 @@ fn delay_cycles(cycles: u32) {
     asm::delay(cycles);
 }
 
+// TIM1_CCMR2 contains CH3 and CH4 output-compare mode fields.
+// CH3 drives the W phase PWM path. CH4 is kept as an internal
+// compare/reference event for current-sense injected-ADC debug.
+// Any helper that rewrites CH3 must preserve CH4.
+const TIM1_CCMR2_OC3M_MASK_LOCAL: u32 = 0b111 << 4;
+
+
 // ------------------------------------------------------------
 // TIM1 readback structures
 // ------------------------------------------------------------
@@ -94,7 +109,9 @@ pub fn set_tim1_modes_for_state(state: DriveState) {
             (state.ch1_mode() << 4) |
             (state.ch2_mode() << 12);
 
-        let ccmr2 = state.ch3_mode() << 4;
+        let mut ccmr2 = read_volatile(TIM1_CCMR2);
+        ccmr2 &= !TIM1_CCMR2_OC3M_MASK_LOCAL;
+        ccmr2 |= state.ch3_mode() << 4;
 
         write_volatile(TIM1_CCMR1, ccmr1);
         write_volatile(TIM1_CCMR2, ccmr2);
@@ -107,10 +124,32 @@ pub fn set_tim1_modes_for_sine_pwm() {
             (TIM1_CCMR_PWM_MODE_1 << 4) |
             (TIM1_CCMR_PWM_MODE_1 << 12);
 
-        let ccmr2 = TIM1_CCMR_PWM_MODE_1 << 4;
+        let mut ccmr2 = read_volatile(TIM1_CCMR2);
+        ccmr2 &= !TIM1_CCMR2_OC3M_MASK_LOCAL;
+        ccmr2 |= TIM1_CCMR_PWM_MODE_1 << 4;
 
         write_volatile(TIM1_CCMR1, ccmr1);
         write_volatile(TIM1_CCMR2, ccmr2);
+    }
+}
+
+pub fn configure_tim1_ch4_current_sense_trigger() {
+    unsafe {
+        // CH4 is used as an internal output-compare/reference event only.
+        // No CH4 GPIO pin is configured, and CC4E/CC4NE stay disabled.
+        write_volatile(TIM1_CCR4, CURRENT_SENSE_INJECTED_TIM1_CCR4);
+
+        let mut ccmr2 = read_volatile(TIM1_CCMR2);
+        ccmr2 &= !(TIM1_CCMR2_CC4S_MASK
+            | TIM1_CCMR2_OC4FE
+            | TIM1_CCMR2_OC4PE
+            | TIM1_CCMR2_OC4M_MASK);
+        ccmr2 |= TIM1_CCMR2_OC4_INTERNAL_TRIGGER_CONFIG;
+        write_volatile(TIM1_CCMR2, ccmr2);
+
+        let mut ccer = read_volatile(TIM1_CCER);
+        ccer &= !TIM1_CCER_CC4_OUTPUT_MASK;
+        write_volatile(TIM1_CCER, ccer);
     }
 }
 
@@ -201,7 +240,9 @@ pub fn apply_pwm_vector(state: DriveState, duty: u32) {
         );
 
         let ccmr1 = (ch1_mode << 4) | (ch2_mode << 12);
-        let ccmr2 = ch3_mode << 4;
+        let mut ccmr2 = read_volatile(TIM1_CCMR2);
+        ccmr2 &= !TIM1_CCMR2_OC3M_MASK_LOCAL;
+        ccmr2 |= ch3_mode << 4;
         write_volatile(TIM1_CCMR1, ccmr1);
         write_volatile(TIM1_CCMR2, ccmr2);
 
@@ -415,6 +456,7 @@ pub fn setup_tim1_base() {
         write_volatile(TIM1_CCR1, 0);
         write_volatile(TIM1_CCR2, 0);
         write_volatile(TIM1_CCR3, 0);
+        write_volatile(TIM1_CCR4, CURRENT_SENSE_INJECTED_TIM1_CCR4);
 
         set_tim1_modes_for_state(DriveState::IdleAllOff);
 
@@ -429,7 +471,7 @@ pub fn setup_tim1_base() {
 // Footer
 // File: tim1.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/tim1.rs
-// Version: v0.5.2-openloop-sine-96-fast-loop
+// Version: v0.5.13-preserve-ch4-ocref
 // Created: 2026-06-07
-// Generated timestamp: 2026-06-08T03:57:09Z
+// Generated timestamp: 2026-06-08T08:12:00Z
 // ================================================================

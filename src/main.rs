@@ -1,41 +1,38 @@
 // ================================================================
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.5.2-openloop-sine-96-fast-loop
-// Purpose: STM32G431CB Rust: open-loop sine/SPWM motor test for
-//          the ST B-G431B-ESC1 board.
+// Version: v0.5.23-op3v-regular-naming
+// Purpose: STM32G431CB Rust: open-loop sine/SPWM motor test plus
+//          compact TIM1-triggered injected ADC FOC-prep current sample
+//          output with empirical OPAMP-to-command phase-map fields,
+//          OP3/VOPAMP3 regular ADC diagnostic naming, and end-of-run
+//          compact sector summaries for the ST B-G431B-ESC1 board.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
 //
-// Change summary vs v0.5.0:
-//   - Version string unified to the v0.5.2 baseline, including the RTT
-//     startup banner, so the running firmware reports the same milestone
-//     as Cargo.toml, sine.rs, and the README.
-//   - No change to startup sequence, control loop, or drive behavior.
+// Change summary vs v0.5.22:
+//   - Cleans startup/runtime wording so OP3/VOPAMP3 is consistently
+//     described as a regular ADC diagnostic read.
+//   - Keeps the actual injected pair wording explicit:
+//       ADC1 injected = OP1 external VOUT
+//       ADC2 injected = OP2 external VOUT
+//   - Does not change drive behavior, ADC setup, TIM1_CH4 setup, sampling
+//     timing, current offsets, sine ramp, or dead-man behavior.
 //
-// Change summary vs v0.4.1 split baseline:
-//   - Keeps the split module structure.
-//   - Keeps the known-good six-step and BEMF files in the repo.
-//   - Runtime test path is switched from six-step open-loop ramp to
-//     sine/SPWM open-loop ramp.
-//   - User experience is intentionally simple:
-//       button released -> all outputs off
-//       button held     -> precharge -> sine alignment -> sine ramp
-//       button released -> immediate all-off
-//   - No potentiometer control yet.
-//   - No BEMF decision logic.
-//   - No closed-loop commutation.
-//   - No FOC.
-//   - No SVPWM.
+// Change summary vs v0.5.21:
+//   - Adds startup/runtime log visibility for the OP3/VOPAMP3 internal
+//     routing diagnostic fields added in regs.rs/opamp.rs/current_sense.rs.
+//   - Keeps motor-drive behavior unchanged: same dead-man flow, same
+//     TIM1_CH4 trigger, same default ADC1=OP1 / ADC2=OP2 injected pair.
+//   - OP3/VOPAMP3 remains diagnostic only; no phase-current reconstruction,
+//     Clarke/Park, current PI, sector switching, or SVPWM.
 //
 // Learning notes:
 //   - Sine/SPWM mode drives all three phases using TIM1 CH1/CH1N,
 //     CH2/CH2N, and CH3/CH3N complementary PWM.
-//   - This differs from six-step mode, where one phase floats and BEMF
-//     can be observed. In sine/SPWM, BEMF observe is not meaningful
-//     because no phase is intentionally floating.
-//   - The first test remains dead-man-button controlled and conservative:
-//     fixed amplitude ramp, fixed electrical-angle ramp, low voltage,
-//     strict current limit, no prop.
+//   - The TIM1_CH4-triggered injected pair is still OP1/OP2 only.
+//   - OP3/VOPAMP3 is currently sampled as a regular ADC2 diagnostic read
+//     so we can verify the internal routing before sector-switched current
+//     reconstruction.
 // ================================================================
 
 #![no_std]
@@ -59,11 +56,15 @@ mod log;
 #[allow(dead_code)]
 mod sixstep;
 mod sine;
+mod opamp;
+mod current_sense;
 
 use crate::adc::*;
+use crate::current_sense::*;
 use crate::drive::*;
 use crate::gpio::*;
 use crate::log::*;
+use crate::opamp::*;
 use crate::regs::*;
 use crate::safety::*;
 use crate::sine::*;
@@ -90,32 +91,41 @@ fn setup_gpio_base() {
         force_drive_output_latches_low();
 
         set_pin_mode(GPIOA_MODER, VBUS_PIN, 0b11);
+        set_pin_mode(GPIOA_MODER, OP1_INP_PIN, 0b11);
         set_pin_mode(GPIOA_MODER, OP1_OUT_PIN, 0b11);
         set_pin_mode(GPIOA_MODER, OP2_OUT_PIN, 0b11);
+        set_pin_mode(GPIOA_MODER, OP2_INP_PIN, 0b11);
 
         let mut gpioa_pupdr = read_volatile(GPIOA_PUPDR);
         gpioa_pupdr &= !(0b11 << (VBUS_PIN * 2));
+        gpioa_pupdr &= !(0b11 << (OP1_INP_PIN * 2));
         gpioa_pupdr &= !(0b11 << (OP1_OUT_PIN * 2));
         gpioa_pupdr &= !(0b11 << (OP2_OUT_PIN * 2));
+        gpioa_pupdr &= !(0b11 << (OP2_INP_PIN * 2));
         write_volatile(GPIOA_PUPDR, gpioa_pupdr);
 
         let mut gpioa_ascr = read_volatile(GPIOA_ASCR);
         gpioa_ascr |= 1 << VBUS_PIN;
+        gpioa_ascr |= 1 << OP1_INP_PIN;
         gpioa_ascr |= 1 << OP1_OUT_PIN;
         gpioa_ascr |= 1 << OP2_OUT_PIN;
+        gpioa_ascr |= 1 << OP2_INP_PIN;
         write_volatile(GPIOA_ASCR, gpioa_ascr);
 
+        set_pin_mode(GPIOB_MODER, OP3_INP_PIN, 0b11);
         set_pin_mode(GPIOB_MODER, OP3_OUT_PIN, 0b11);
         set_pin_mode(GPIOB_MODER, POT_PIN, 0b11);
         set_pin_mode(GPIOB_MODER, TEMP_PIN, 0b11);
 
         let mut gpiob_pupdr = read_volatile(GPIOB_PUPDR);
+        gpiob_pupdr &= !(0b11 << (OP3_INP_PIN * 2));
         gpiob_pupdr &= !(0b11 << (OP3_OUT_PIN * 2));
         gpiob_pupdr &= !(0b11 << (POT_PIN * 2));
         gpiob_pupdr &= !(0b11 << (TEMP_PIN * 2));
         write_volatile(GPIOB_PUPDR, gpiob_pupdr);
 
         let mut gpiob_ascr = read_volatile(GPIOB_ASCR);
+        gpiob_ascr |= 1 << OP3_INP_PIN;
         gpiob_ascr |= 1 << OP3_OUT_PIN;
         gpiob_ascr |= 1 << POT_PIN;
         gpiob_ascr |= 1 << TEMP_PIN;
@@ -233,9 +243,14 @@ fn main() -> ! {
 
     apply_state(DriveState::IdleAllOff);
 
+    let opamp_status = setup_opamps_for_current_sense();
     let (adc1_setup_status, adc2_setup_status) = setup_adc_for_board_monitor();
+    configure_current_sense_adc_sample_time_for_sync();
+    let injected_config = configure_current_sense_injected_tim1_ch4();
 
-    let baseline = read_adc_snapshot();
+    let baseline_seed = read_adc_snapshot();
+    let current_offsets = capture_current_sense_offsets(CURRENT_SENSE_OFFSET_SAMPLES);
+    let baseline = adc_baseline_with_current_offsets(baseline_seed, current_offsets);
     let startup_drive = read_drive();
     let startup_tim1 = read_tim1_for_state(DriveState::IdleAllOff);
 
@@ -246,6 +261,9 @@ fn main() -> ! {
         && no_phase_overlap(startup_drive) == 1
         && startup_tim1.tim1_basic_ok == 1
         && baseline.timeout == 0
+        && opamp_status.setup_ok == 1
+        && current_offsets.timeout == 0
+        && current_offsets.op3_vopamp3_timeout == 0
     {
         1
     } else {
@@ -254,7 +272,7 @@ fn main() -> ! {
 
     rprintln!("================================================");
     rprintln!("B-G431B-ESC1 Rust bring-up");
-    rprintln!("Version: v0.5.2-openloop-sine-96-fast-loop");
+    rprintln!("Version: v0.5.23-op3v-regular-naming");
     rprintln!("Mode: open-loop sine/SPWM test");
     rprintln!("Button released: all outputs off.");
     rprintln!("Button held: precharge -> sine align -> open-loop sine ramp.");
@@ -266,6 +284,63 @@ fn main() -> ! {
     );
     rprintln!("ADC1 setup status: {}", adc1_setup_status);
     rprintln!("ADC2 setup status: {}", adc2_setup_status);
+
+    rprintln!("OPAMP current-sense bring-up:");
+    rprintln!("  OPAMP1: VINP0 PA1 -> VOUT PA2 -> ADC1_IN3");
+    rprintln!("  OPAMP2: VINP0 PA7 -> VOUT PA6 -> ADC2_IN3");
+    rprintln!("  OPAMP3 external: VINP0 PB0 -> VOUT PB1 -> ADC1_IN12");
+    rprintln!("  OPAMP3/VOPAMP3 regular diagnostic: internal route -> ADC2_IN18");
+    rprintln!("  mode: PGA, gain x16, high-speed, factory trim");
+    rprintln!("  note: raw ADC-count logging only; not calibrated amps");
+    rprintln!(
+        "  foc-prep injected pair: trigger=TIM1_CH4 target_cnt={} ADC1=OP1_EXTERNAL ADC2=OP2_EXTERNAL sample_bits={} max_wait_loops={}",
+        CURRENT_SENSE_INJECTED_TIM1_CCR4,
+        CURRENT_SENSE_SYNC_SAMPLE_BITS,
+        CURRENT_SENSE_INJECTED_WAIT_MAX_LOOPS
+    );
+    rprintln!("  op3v_regular diagnostic is not part of the injected pair yet.");
+
+    rprintln!(
+        "OPAMP status: setup_ok={} en1={} en2={} en3={} cfg1_ok={} cfg2_ok={} cfg3_ok={} op3_vopamp3_internal_ok={} csr1=0x{:08x} csr2=0x{:08x} csr3=0x{:08x}",
+        opamp_status.setup_ok,
+        opamp_status.en1,
+        opamp_status.en2,
+        opamp_status.en3,
+        opamp_status.cfg1_ok,
+        opamp_status.cfg2_ok,
+        opamp_status.cfg3_ok,
+        opamp_status.op3_vopamp3_internal_ok,
+        opamp_status.csr1,
+        opamp_status.csr2,
+        opamp_status.csr3
+    );
+    rprintln!(
+        "Current-sense zero offsets: timeout={} samples_used={} samples_requested={} op1_zero={} op2_zero={} op3_zero={} op3v_regular_zero={} op3v_regular_samples_used={} op3v_regular_timeout={}",
+        current_offsets.timeout,
+        current_offsets.samples_used,
+        current_offsets.samples_requested,
+        current_offsets.op1_zero,
+        current_offsets.op2_zero,
+        current_offsets.op3_zero,
+        current_offsets.op3_vopamp3_zero,
+        current_offsets.op3_vopamp3_samples_used,
+        current_offsets.op3_vopamp3_timeout
+    );
+
+    rprintln!(
+        "FOC-prep injected setup: setup_ok={} target_cnt={} tim1_ccr4={} ch4_oc_ok={} tim1_ccmr2=0x{:08x} tim1_ccer=0x{:08x} adc1_jsqr=0x{:08x} adc2_jsqr=0x{:08x} adc2_channel={} adc1_cfgr=0x{:08x} adc2_cfgr=0x{:08x} injected_pair=ADC1_OP1_EXTERNAL_ADC2_OP2_EXTERNAL op3v_regular_path=ADC2_IN18 trigger=TIM1_CH4",
+        injected_config.setup_ok,
+        injected_config.target_cnt,
+        injected_config.tim1_ccr4,
+        injected_config.tim1_ch4_oc_ok,
+        injected_config.tim1_ccmr2,
+        injected_config.tim1_ccer,
+        injected_config.adc1_jsqr,
+        injected_config.adc2_jsqr,
+        injected_config.adc2_channel,
+        injected_config.adc1_cfgr,
+        injected_config.adc2_cfgr
+    );
 
     rprintln!("Sine/SPWM:");
     rprintln!("  TIM1 complementary outputs: CH1/CH1N CH2/CH2N CH3/CH3N");
@@ -290,10 +365,19 @@ fn main() -> ! {
     rprintln!("  BEMF observe is not used in sine/SPWM mode.");
     rprintln!("  Potentiometer is read only; it does not control this first test.");
     rprintln!("  This is open-loop angle generation only.");
+    rprintln!("  focmap lines use TIM1_CH4-triggered injected ADC for OP1/OP2 only.");
+    rprintln!("  OP3/VOPAMP3 is currently a regular ADC diagnostic read labeled op3v_regular_*.");
+    rprintln!("  Current-sense lines are observation-only and do not affect drive output.");
+    rprintln!("  op1/op2 samples are not named ia/ib until phase mapping is confirmed.");
+    rprintln!("  focsum lines print end-of-run compact sector summaries for OP1/OP2 plus OP3/VOPAMP3 regular diagnostic counts.");
 
     rprintln!(
-        "startup: startup_ok={} af_ok={} pins_ok={} no_phase_overlap={} tim1_ok={} UH={} UL={} VH={} VL={} WH={} WL={} ccer={} moe={} forced_modes_ok={} pot_raw={} temp_raw={} vbus_raw={} op1_raw={} op2_raw={} op3_raw={} timeout={}",
+        "startup: startup_ok={} opamp_ok={} op3v_internal_ok={} cs_offset_ok={} op3v_regular_offset_ok={} af_ok={} pins_ok={} no_phase_overlap={} tim1_ok={} UH={} UL={} VH={} VL={} WH={} WL={} ccer={} moe={} forced_modes_ok={} pot_raw={} temp_raw={} vbus_raw={} op1_raw={} op2_raw={} op3_raw={} timeout={}",
         startup_ok,
+        opamp_status.setup_ok,
+        opamp_status.op3_vopamp3_internal_ok,
+        if current_offsets.timeout == 0 { 1 } else { 0 },
+        if current_offsets.op3_vopamp3_timeout == 0 { 1 } else { 0 },
         startup_drive.af_ok,
         startup_pins_ok,
         no_phase_overlap(startup_drive),
@@ -317,9 +401,13 @@ fn main() -> ! {
     );
 
     rprintln!("Expected idle: startup_ok=1 UH=0 UL=0 VH=0 VL=0 WH=0 WL=0");
-    rprintln!("During run: sine log lines show CCR1/CCR2/CCR3 and health gate.");
+    rprintln!("During run: sine log lines show PWM/health; focmap lines walk through electrical phase for injected OP1/OP2 and regular OP3/VOPAMP3 diagnostic data.");
+    rprintln!("End of run: focsum sector summary labels use explicit *_samples and *_avg names.");
+    rprintln!("Current-sense: watch focmap ok=1, jeos1=1, jeos2=1, to=0, rail=0, op3v_regular_valid=1, changing phase_idx/sector60/ref_u/ref_v/ref_w/op1_delta/op2_delta/op3v_regular_delta.");
     rprintln!("Safety stops: button release, health fault, max step count.");
     rprintln!("================================================");
+
+    log_current_sense(0, "startup", current_offsets);
 
     let mut run_id: u32 = 1;
 
@@ -327,7 +415,9 @@ fn main() -> ! {
         apply_state(DriveState::IdleAllOff);
 
         if button_pressed() {
-            run_sine_openloop(run_id, baseline);
+            log_current_sense(run_id, "pre_run", current_offsets);
+            run_sine_openloop(run_id, baseline, current_offsets);
+            log_current_sense(run_id, "post_run", current_offsets);
 
             while button_pressed() {
                 apply_state(DriveState::IdleAllOff);
@@ -341,6 +431,7 @@ fn main() -> ! {
             led_low();
 
             log_state(run_id, 0, 0, 0, DriveState::IdleAllOff, baseline);
+            log_current_sense(run_id, "idle", current_offsets);
 
             delay_cycles(IDLE_LED_OFF_DELAY);
             delay_cycles(IDLE_LOG_DELAY);
@@ -352,7 +443,7 @@ fn main() -> ! {
 // Footer
 // File: main.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/main.rs
-// Version: v0.5.2-openloop-sine-96-fast-loop
-// Created: 2026-06-07
-// Generated timestamp: 2026-06-08T03:57:09Z
+// Version: v0.5.23-op3v-regular-naming
+// Created: 2026-06-08
+// Generated timestamp: 2026-06-08T16:40:00Z
 // ================================================================

@@ -1,11 +1,28 @@
 // ================================================================
 // File: log.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/log.rs
-// Version: v0.4.8-split-log-same-behavior
-// Purpose: Runtime verification and heartbeat logging helpers for
-//          the B-G431B-ESC1 Rust open-loop six-step + BEMF observe
-//          firmware.
+// Version: v0.5.23-op3v-regular-naming
+// Purpose: Runtime verification, heartbeat logging, and raw
+//          current-sense and OP3/VOPAMP3 regular-ADC diagnostic
+//          logging helpers for the B-G431B-ESC1 Rust open-loop
+//          sine/SPWM bring-up firmware.
 // Target: B-G431B-ESC1, STM32G431CB, Cortex-M4F
+//
+// Change summary vs v0.5.22:
+//   - Updates current-sense diagnostic naming so OP3/VOPAMP3 is clearly
+//     labeled as a regular ADC diagnostic read, not an injected sample.
+//   - Adds OP3/VOPAMP3 regular-route fields to the compact `cs` log line.
+//   - No drive, ADC setup, TIM1, or sampling behavior change.
+//
+// Change summary vs v0.5.3:
+//   - Version-only sync with corrected OPAMP CSR offset/current-sense capture
+//     pass. Logging fields are unchanged.
+//
+// Change summary vs v0.4.8:
+//   - Adds a compact current-sense log line using averaged OPAMP zero offsets.
+//   - Existing log_state() and log_heartbeat() signatures are preserved.
+//   - Existing op1/op2/op3 raw/delta fields remain in the normal logs.
+//   - No FOC, ADC trigger sync, current loop, or drive behavior change.
 //
 // Split note:
 //   This file is a behavior-preserving extraction from main.rs.
@@ -24,6 +41,7 @@
 use rtt_target::rprintln;
 
 use crate::adc::*;
+use crate::current_sense::*;
 use crate::drive::*;
 use crate::gpio::button_pressed;
 use crate::regs::*;
@@ -122,12 +140,8 @@ pub fn log_state(
 }
 
 // ------------------------------------------------------------
-// Compact run heartbeat (once per electrical rev during the ramp)
+// Compact run heartbeat
 // ------------------------------------------------------------
-// High-side pins are PWMing during a vector, so an instantaneous IDR
-// read of a high pin is non-deterministic and is reported, not
-// asserted. The health gate uses only deterministic / safety signals:
-// AF mapping, no high+low overlap, temp delta, ADC timeout.
 
 pub fn log_heartbeat(
     run_id: u32,
@@ -190,12 +204,47 @@ pub fn log_heartbeat(
     health_ok
 }
 
+// ------------------------------------------------------------
+// Current-sense observation log
+// ------------------------------------------------------------
+
+pub fn log_current_sense(run_id: u32, label: &str, offsets: CurrentSenseOffsets) -> u32 {
+    let cs = read_current_sense(offsets);
+
+    rprintln!(
+        "cs run={} label={} cs_ok={} op1_raw={} op1_zero={} op1_delta={} op2_raw={} op2_zero={} op2_delta={} op3_raw={} op3_zero={} op3_delta={} op3v_regular_raw={} op3v_regular_zero={} op3v_regular_delta={} op3v_regular_ok={} op3v_regular_timeout={} near_high_rail={} timeout={} samples_used={} samples_requested={} op3v_regular_samples_used={}",
+        run_id,
+        label,
+        cs.ok,
+        cs.op1_raw,
+        cs.op1_zero,
+        cs.op1_delta,
+        cs.op2_raw,
+        cs.op2_zero,
+        cs.op2_delta,
+        cs.op3_raw,
+        cs.op3_zero,
+        cs.op3_delta,
+        cs.op3_vopamp3_raw,
+        cs.op3_vopamp3_zero,
+        cs.op3_vopamp3_delta,
+        cs.op3_vopamp3_ok,
+        cs.op3_vopamp3_timeout,
+        cs.near_high_rail,
+        cs.timeout,
+        offsets.samples_used,
+        offsets.samples_requested,
+        offsets.op3_vopamp3_samples_used
+    );
+
+    cs.ok
+}
 
 // ================================================================
 // Footer
 // File: log.rs
 // Path: ~/stm32-rust-test/b-g431b-esc1-rust/src/log.rs
-// Version: v0.4.8-split-log-same-behavior
-// Created: 2026-06-07
-// Generated timestamp: 2026-06-07T00:00:00Z
+// Version: v0.5.23-op3v-regular-naming
+// Created: 2026-06-08
+// Generated timestamp: 2026-06-08T16:30:00Z
 // ================================================================
