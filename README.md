@@ -1,30 +1,36 @@
 # B-G431B-ESC1 Rust Bring-up
 
-Rust bare-metal bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
+Rust bare-metal motor-control bring-up project for the ST B-G431B-ESC1 Discovery kit using the STM32G431CB motor-control MCU.
 
-Current confirmed milestone:
+Current confirmed baseline:
 
 ```text
-v0.4.0-bemf-observe-openloop
+v0.4.1-split-same-behavior
 ```
 
-Current working baseline:
+Current state:
 
 ```text
-Monolithic src/main.rs
-Open-loop six-step PWM motor drive
-Floating-phase BEMF observation only
-No closed-loop commutation yet
+The source split is complete and confirmed successful.
+The firmware is no longer a monolithic main.rs-only source file.
+The split preserved the previous v0.4.0 motor behavior.
+The build is warning-free after removing the unused DeadtimeAllOff placeholder state.
+The current motor-control mode remains open-loop six-step PWM with floating-phase BEMF observation only.
+No closed-loop commutation has been added yet.
+No sinusoidal/SPWM control has been added yet.
 ```
 
-Near-term direction:
+Next planned control experiment:
 
 ```text
-1. Preserve and commit the current monolithic v0.4.0 baseline.
-2. Split src/main.rs into focused modules with no behavior change.
-3. Test the split version against the same motor/BEMF behavior.
-4. Add open-loop sine/SPWM as the next control experiment.
-5. Later prepare for current-sensed FOC work.
+v0.5.0-openloop-sine-spwm
+```
+
+Goal of the next milestone:
+
+```text
+Add a separate open-loop sinusoidal/SPWM experiment after the successful source split is committed/tagged.
+Keep the current six-step implementation available as the known-good baseline.
 ```
 
 ---
@@ -52,12 +58,23 @@ sram: 32 KiB
 Current motor-test setup:
 
 ```text
-Small 2212 BLDC motor
-No prop
-Bench supply around 8 V during early spin tests
-Current-limited supply, raised cautiously as needed
-Button-held dead-man operation
-Board and motor remained cool during the latest tests
+Motor: 2212 BLDC, 900 KV
+Prop: none
+Bench voltage: 10 V during latest split-validation motor test
+Bench current-limit setting: 1.5 A
+Observed draw during latest test: about 300 mA
+Control mode: button-held dead-man operation
+Firmware mode: open-loop six-step PWM + BEMF observe
+```
+
+Current safety practice:
+
+```text
+No prop.
+Low voltage.
+Bench current limit enabled.
+Button release stops the run.
+Board and motor are checked for abnormal heating during testing.
 ```
 
 ---
@@ -101,7 +118,7 @@ cargo build --release
 
 ## Current project tree
 
-Before the planned split, the project is intentionally simple:
+The v0.4.1 source split is complete:
 
 ```text
 .
@@ -112,28 +129,45 @@ Before the planned split, the project is intentionally simple:
 ├── memory.x
 ├── README.md
 └── src
-    └── main.rs
+    ├── adc.rs
+    ├── bemf.rs
+    ├── drive.rs
+    ├── gpio.rs
+    ├── log.rs
+    ├── main.rs
+    ├── regs.rs
+    ├── safety.rs
+    ├── sixstep.rs
+    └── tim1.rs
 ```
 
-The first refactor will only add files under `src/`.
-
-Expected split direction:
+Module responsibilities:
 
 ```text
-src/
-├── main.rs
-├── regs.rs
-├── gpio.rs
-├── adc.rs
-├── tim1.rs
-├── drive.rs
-├── bemf.rs
-├── sixstep.rs
-├── log.rs
-└── safety.rs
+src/main.rs      startup sequence, top-level initialization, main control loop
+src/regs.rs      register bases, register pointers, bit masks, board constants
+src/gpio.rs      generic GPIO helpers, LED, button input
+src/adc.rs       ADC setup, channel selection, raw ADC reads, board monitor snapshot
+src/tim1.rs      TIM1 setup, PWM vectors, CCER/CCMR/BDTR readback
+src/drive.rs     DriveState, expected pin/CCER states, drive-pin readback, overlap checks
+src/bemf.rs      BEMF pin setup, floating-phase selection, floating-phase ADC sampling
+src/sixstep.rs   open-loop six-step ramp runner
+src/log.rs       structured RTT status logging
+src/safety.rs    delay helpers and button-held delay/dead-man helper
 ```
 
-The first split is a refactor-only step. It should preserve the current `v0.4.0-bemf-observe-openloop` behavior before sine control is added.
+Split validation rules that were followed:
+
+```text
+No intended behavior change.
+Kept the current six-step + BEMF observe path intact.
+Kept the same button dead-man behavior.
+Kept the same startup checks and safety logging.
+Kept the same motor-test behavior.
+Kept BEMF observation as-is.
+Did not add sine control during the split.
+Did not add closed-loop commutation during the split.
+```
 
 ---
 
@@ -463,20 +497,55 @@ Button held to run
 Button released to stop
 ```
 
-Current milestone:
-
-```text
-v0.4.0-bemf-observe-openloop
-```
-
-Confirmed behavior:
+Current behavior:
 
 ```text
 The motor can rotate continuously in open loop.
 At low current it buzzed/hummed and turned slowly/jittery.
-Raising bench current limit improved the ability to follow the commutation.
+Raising the bench current limit improved the ability to follow the commutation.
 At higher commanded speed, BEMF readings became more visible.
-Board and motor stayed cool in the reported tests.
+Board and motor stayed cool in reported tests.
+```
+
+Latest split-validation motor test:
+
+```text
+Milestone: v0.4.1-split-same-behavior
+Motor: 2212 900 KV BLDC
+Prop: none
+Bench voltage: 10 V
+Bench current-limit setting: 1.5 A
+Observed current during run: about 300 mA
+Run result: completed programmed vector sequence
+Stop reason: max_steps
+No reported abnormal heating
+```
+
+Representative run result from latest test:
+
+```text
+run_stop run=2 cycle_ok=1 vector_steps=1000 button=1 reason=max_steps
+```
+
+Safety fields observed during the split-validation run:
+
+```text
+health_ok=1
+button=1
+af_ok=1
+no_phase_overlap=1
+timeout=0
+```
+
+After-run idle state observed:
+
+```text
+state=idle_all_off
+UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+active_count=0
+active_count_ok=1
+tim1_ok=1
+forced_modes_ok=1
 ```
 
 PWM carrier:
@@ -484,7 +553,7 @@ PWM carrier:
 ```text
 TIM1 ARR = 799
 Default HSI16 timer clock assumption gives about 20 kHz PWM carrier.
-The audible buzz heard during recent tests is more likely six-step torque ripple, open-loop slip/catch behavior, logging/timing disturbance, or bench-supply current limiting, not the 20 kHz PWM carrier itself.
+The audible buzz heard during tests is more likely six-step torque ripple, open-loop slip/catch behavior, logging/timing disturbance, or bench-supply current limiting, not the 20 kHz PWM carrier itself.
 ```
 
 Bring-up lesson:
@@ -506,26 +575,100 @@ Floating phase selected from the six-step vector
 Four ADC samples logged as b0..b3
 ```
 
-Observed behavior:
+Current log fields are intentionally concrete:
 
 ```text
-BEMF-like readings appear more clearly once the motor reaches some RPM.
-Some phase/sample combinations still read zero or are not phase-clean.
-The signal path appears alive, but the current sampling strategy is not ready to close the loop.
+vector=...
+float_phase=...
+b0=...
+b1=...
+b2=...
+b3=...
+```
+
+Observed BEMF pattern from the current test setup:
+
+```text
+The floating-phase BEMF log is consistent throughout the run.
+Every other vector line can show zero readings.
+The following vector line for that phase can show the expected nonzero readings.
+This repeating pattern appears consistent, not random.
+All three phases have shown nonzero readings in their corresponding floating-phase positions.
 ```
 
 Current interpretation:
 
 ```text
-The BEMF path is useful for learning and instrumentation.
-The sampling method needs cleanup before it is trusted for zero-cross commutation.
-The next six-step/BEMF improvement would log all three BEMF channels per vector to verify mapping and waveform behavior.
+The BEMF inputs appear alive.
+The alternating zero/nonzero pattern is being preserved as raw logged information.
+No closed-loop commutation uses this data yet.
+No additional interpreted labels have been added to the log.
 ```
 
 Bring-up lesson:
 
 ```text
-BEMF sensing is coupled to the drive strategy. Six-step leaves a floating phase. Sine/SPWM generally drives all three phases, so the existing floating-phase BEMF method is not directly transferable to the sine test.
+At this stage, preserving the exact vector, floating phase, and raw b0..b3 samples is more useful than replacing them with interpreted labels. The raw pattern is part of the evidence needed before any zero-cross or observer logic is added.
+```
+
+---
+
+## Source split validation
+
+Split milestone:
+
+```text
+v0.4.1-split-same-behavior
+```
+
+Build result:
+
+```text
+cargo build --release passed.
+The previous DeadtimeAllOff dead-code warning was cleaned up by removing the unused placeholder state.
+The build is warning-free after that cleanup.
+```
+
+No-motor runtime check:
+
+```text
+cargo run --release flashed and ran successfully.
+Startup log appeared normally.
+Idle all-off state was confirmed.
+ADC logs remained present.
+BEMF startup text remained present.
+```
+
+Representative no-motor idle fields after split:
+
+```text
+state=idle_all_off
+button=0
+af_ok=1
+pins_ok=1
+no_phase_overlap=1
+active_count=0
+active_count_ok=1
+tim1_ok=1
+forced_modes_ok=1
+UH=0 UL=0 VH=0 VL=0 WH=0 WL=0
+```
+
+Motor/no-prop runtime check:
+
+```text
+The motor test behavior matched the pre-split behavior.
+The run completed the programmed vector count.
+The firmware returned to idle all-off after the run.
+The logs showed the expected safety fields.
+```
+
+Conclusion:
+
+```text
+The source split is confirmed successful.
+The current baseline is v0.4.1-split-same-behavior.
+The project is ready to commit/tag at this state before changing control behavior.
 ```
 
 ---
@@ -535,10 +678,10 @@ BEMF sensing is coupled to the drive strategy. Six-step leaves a floating phase.
 Current baseline:
 
 ```text
-v0.4.0-bemf-observe-openloop
+v0.4.1-split-same-behavior
 ```
 
-The project currently has a working monolithic firmware file that can:
+The project currently has working split-module firmware that can:
 
 ```text
 initialize STM32G431 clocks and peripherals directly
@@ -549,6 +692,7 @@ command open-loop six-step PWM motor drive
 observe floating-phase BEMF during six-step operation
 stop on button release
 log status through RTT
+build warning-free after removal of unused DeadtimeAllOff placeholder
 ```
 
 Current safety state from recent logs:
@@ -558,7 +702,6 @@ health_ok=1
 af_ok=1
 no_phase_overlap=1
 timeout=0
-temperature delta remained below abort threshold
 runs stopped because of max_steps or button release, not a detected electrical fault
 ```
 
@@ -583,64 +726,7 @@ A scope is still useful before aggressive PWM, higher current, closed-loop commu
 
 ---
 
-## Immediate next step: split the monolithic file
-
-The next code step is:
-
-```text
-v0.4.1-split-same-behavior
-```
-
-Goal:
-
-```text
-Split src/main.rs into focused modules without changing behavior.
-```
-
-Rules for the split:
-
-```text
-No behavior change.
-Keep the current six-step + BEMF observe path intact.
-Keep the same button dead-man behavior.
-Keep the same startup checks and safety logging.
-Keep the same motor-test behavior.
-Keep BEMF observation as-is for the first split.
-Do not add sine control in the split commit.
-```
-
-Expected files:
-
-```text
-src/main.rs
-src/regs.rs
-src/gpio.rs
-src/adc.rs
-src/tim1.rs
-src/drive.rs
-src/bemf.rs
-src/sixstep.rs
-src/log.rs
-src/safety.rs
-```
-
-Purpose of the split:
-
-```text
-Make the code easier to inspect and test.
-Keep raw register definitions isolated.
-Keep board pin setup isolated.
-Keep ADC monitor code isolated.
-Keep TIM1 PWM/output control isolated.
-Keep six-step and BEMF logic separate.
-Prepare for sine/SPWM and later FOC without mixing strategies.
-```
-
-The split files should include practical bring-up notes about what was learned from the board, especially where the lesson affects future maintenance or safety.
-
----
-
-## Next control experiment after split: open-loop sine/SPWM
+## Next control experiment: open-loop sine/SPWM
 
 Planned milestone:
 
@@ -665,7 +751,8 @@ Advance electrical angle open-loop.
 Ramp amplitude and electrical speed conservatively.
 Keep button dead-man.
 Keep VBUS and temperature monitoring.
-Disable current BEMF logging during the first sine test.
+Disable current BEMF logging during the first sine test if the logging gets in the way of timing clarity.
+Keep sixstep.rs available as the known-good baseline.
 ```
 
 Expected benefit:
@@ -704,6 +791,7 @@ v0.9.x first closed-loop current-control experiments
 FOC-oriented modules later may include:
 
 ```text
+sine.rs
 foc.rs
 clarke_park.rs
 current.rs
@@ -733,21 +821,11 @@ v0.4.1-split-same-behavior
 v0.5.0-openloop-sine-spwm
 ```
 
-Recommended baseline commit before split:
+Recommended split commit:
 
 ```bash
-git add Cargo.toml README.md src/main.rs
-git commit -m "Save v0.4.0 BEMF observe open-loop baseline"
-git tag -a v0.4.0-bemf-observe-openloop -m "BEMF observe open-loop baseline"
-git push
-git push origin v0.4.0-bemf-observe-openloop
-```
-
-Recommended split commit later:
-
-```bash
-git add src
-git commit -m "Split v0.4.0 ESC bring-up firmware into modules"
+git add Cargo.toml README.md src/main.rs src/*.rs
+git commit -m "Confirm v0.4.1 split same behavior"
 git tag -a v0.4.1-split-same-behavior -m "Split firmware into modules without behavior change"
 git push
 git push origin v0.4.1-split-same-behavior

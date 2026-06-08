@@ -1,22 +1,25 @@
 # ================================================================
 # File: Cargo.toml
 # Path: ~/stm32-rust-test/b-g431b-esc1-rust/Cargo.toml
-# Version: v0.4.0-bemf-observe-openloop
+# Version: v0.4.1-split-same-behavior
 # Purpose: Minimal Rust no_std firmware crate for B-G431B-ESC1
 #          bare-metal ESC bring-up with TIM1 PWM, ADC board
-#          monitoring, open-loop six-step drive, and BEMF observe
+#          monitoring, open-loop six-step drive, and BEMF observe.
+#          Source is now split into focused modules with no intended
+#          behavior change from the v0.4.0 open-loop baseline.
 # Target: STM32G431CB, Cortex-M4F, thumbv7em-none-eabihf
 #
 # Bring-up note:
-#   This Cargo.toml intentionally stays simple. The project is still
-#   direct-register bare-metal Rust using cortex-m, cortex-m-rt,
-#   panic-halt, and RTT logging. Board-specific behavior lives in
-#   src/main.rs for the current monolithic baseline.
+#   This project intentionally stays close to the metal. It uses
+#   direct-register Rust with cortex-m, cortex-m-rt, panic-halt, and
+#   RTT logging. The v0.4.1 milestone confirms the monolithic source
+#   was split into src modules while preserving the tested open-loop
+#   six-step + BEMF-observe behavior.
 # ================================================================
 
 [package]
 name = "b-g431b-esc1-rust"
-version = "0.4.0-bemf-observe-openloop"
+version = "0.4.1-split-same-behavior"
 edition = "2024"
 
 [dependencies]
@@ -38,7 +41,7 @@ opt-level = "s"
 # ================================================================
 # Footer
 # File: Cargo.toml
-# Version: v0.4.0-bemf-observe-openloop
+# Version: v0.4.1-split-same-behavior
 # Created: 2026-06-07
 # Generated timestamp: 2026-06-07
 # ================================================================
